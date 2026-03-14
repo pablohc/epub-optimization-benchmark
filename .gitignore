@@ -1,0 +1,40 @@
+# Logs and data files
+logs/
+*.log
+*.txt
+*.csv
+
+# PowerShell
+*.ps1xml
+*.ps1xml
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# IDE and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# Temporary files
+*.tmp
+*.temp
+*.cache
+*.bak
+
+# Build artifacts
+build/
+dist/
+node_modules/
