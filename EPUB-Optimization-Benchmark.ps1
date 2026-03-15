@@ -1869,9 +1869,16 @@ function Start-AnalyzeLogs {
                 $imagesColB = "Images_$($logB.Port)"
             }
 
-            # Add warning marker to winner if images don't match or cover generation status differs
-            if ($hasImageDiscrepancy -or $hasCoverMismatch) {
-                $winner = "$winner [!]"
+            # Add [!] only when misleading: winner did less work (failed cover or fewer images)
+            if (($hasImageDiscrepancy -or $hasCoverMismatch) -and $winner -ne "TIE") {
+                $isMisleadingWinner = if ($winner -eq $winnerA) {
+                    $imagesA -lt $imagesB  # A won but had fewer images
+                } else {
+                    $imagesB -lt $imagesA  # B won but had fewer images
+                }
+                if ($isMisleadingWinner) {
+                    $winner = "$winner [!]"
+                }
             }
 
             # Add dynamic image count columns
