@@ -283,8 +283,8 @@ function Show-CaptureCompleteMenu {
 
 function Show-UnfairComparisonWarning {
     Write-Host ""
-    Write-Host "[!] CONTENT DISCREPANCY WARNING:" -ForegroundColor Yellow
-    Write-Host "  Pages marked with [!] have differences in images or cover generation between versions." -ForegroundColor Yellow
+    Write-WithWarning "[!] CONTENT DISCREPANCY WARNING:" "Yellow"
+    Write-WithWarning "  Pages marked with '[!]' have differences in images or cover generation between versions." "Yellow"
     Write-Host "  - If the WINNER had fewer images/failed cover: result may be MISLEADING" -ForegroundColor Yellow
     Write-Host "    (faster because it did less work, not truly faster)" -ForegroundColor Yellow
     Write-Host "  - If the LOSER had fewer images/failed cover: result is CONSERVATIVE" -ForegroundColor Yellow
@@ -1390,6 +1390,20 @@ function Get-Median {
     }
 }
 
+# Write a string coloring every [!] token in red, rest in $Color
+function Write-WithWarning {
+    param([string]$Text, [string]$Color = "White", [switch]$NoNewline)
+    $parts = $Text -split '(\[!\])'
+    foreach ($part in $parts) {
+        if ($part -eq '[!]') {
+            Write-Host $part -ForegroundColor Red -NoNewline
+        } elseif ($part -ne '') {
+            Write-Host $part -ForegroundColor $Color -NoNewline
+        }
+    }
+    if (-not $NoNewline) { Write-Host "" }
+}
+
 # Function to calculate standard deviation
 function Get-StdDev {
     param($Values, $Mean)
@@ -1603,10 +1617,10 @@ function Start-AnalyzeLogs {
     Write-Host ""
 
     # IMPORTANT WARNING about image loading fairness
-    Write-Host "[!] COMPARISON FAIRNESS WARNING" -ForegroundColor Yellow
+    Write-WithWarning "[!] COMPARISON FAIRNESS WARNING" "Yellow"
     Write-Host "  This analysis compares render times, but does NOT verify if all images" -ForegroundColor Yellow
     Write-Host "  loaded successfully. A faster time may indicate MISSING or FAILED images." -ForegroundColor Yellow
-    Write-Host "  Pages with missing images will be marked with '[!]' in the Winner column." -ForegroundColor Yellow
+    Write-WithWarning "  Pages with missing images will be marked with '[!]' in the Winner column." "Yellow"
     Write-Host ""
     Write-Host ""
 
@@ -1960,7 +1974,11 @@ function Start-AnalyzeLogs {
                     $color = "White"
                 }
 
-                Write-Host ("{0,-$width}" -f $strVal) -ForegroundColor $color -NoNewline
+                if ($strVal -like "*[!]*") {
+                    Write-WithWarning ("{0,-$width}" -f $strVal) $color -NoNewline
+                } else {
+                    Write-Host ("{0,-$width}" -f $strVal) -ForegroundColor $color -NoNewline
+                }
                 Write-Host "  " -NoNewline
             }
             Write-Host ""
@@ -1977,11 +1995,13 @@ function Start-AnalyzeLogs {
         Write-Host ""
         Write-Host "Legend:" -ForegroundColor Cyan
         if ($useAliases) {
-            Write-Host "  - A: ${displayNameA} is faster" -ForegroundColor Green
-            Write-Host "  - B: ${displayNameB} is faster" -ForegroundColor Blue
+            $legendW = "TIE".Length  # = 3
+            Write-Host "  - $("A".PadRight($legendW)): ${displayNameA} is faster" -ForegroundColor Green
+            Write-Host "  - $("B".PadRight($legendW)): ${displayNameB} is faster" -ForegroundColor Blue
         } else {
-            Write-Host "  - Test1: ${displayNameA} is faster" -ForegroundColor Green
-            Write-Host "  - Test2: ${displayNameB} is faster" -ForegroundColor Blue
+            $legendW = "Test1".Length  # = 5
+            Write-Host "  - $("Test1".PadRight($legendW)): ${displayNameA} is faster" -ForegroundColor Green
+            Write-Host "  - $("Test2".PadRight($legendW)): ${displayNameB} is faster" -ForegroundColor Blue
         }
         Write-Host "  - TIE: When the difference is < 1% (statistically insignificant)" -ForegroundColor Gray
         Write-Host ""
@@ -1990,7 +2010,7 @@ function Start-AnalyzeLogs {
         $pagesWithWarnings = $comparison | Where-Object { $_.Winner -like "*[!]*" }
 
         if ($pagesWithWarnings) {
-            Write-Host "[!] UNFAIR COMPARISONS DETECTED:" -ForegroundColor Red
+            Write-WithWarning "[!] UNFAIR COMPARISONS DETECTED:" "Red"
 
             foreach ($page in $pagesWithWarnings) {
                 if ($page.Page -like "*Cover*") {
@@ -1999,22 +2019,7 @@ function Start-AnalyzeLogs {
                     $statusA = if ($coverSuccessA) { "SUCCESS" } else { "FAILED" }
                     $statusB = if ($coverSuccessB) { "SUCCESS" } else { "FAILED" }
 
-                    # Determine display names based on comparison type
-                    if ($useAliases) {
-                        $coverNameA = "A"
-                        $coverNameB = "B"
-                    } elseif ($uniqueTypes -gt 1) {
-                        $coverNameA = $logA.Type
-                        $coverNameB = $logB.Type
-                    } elseif ($uniquePorts -eq 1 -and $uniqueTypes -eq 1) {
-                        $coverNameA = "Test 1"
-                        $coverNameB = "Test 2"
-                    } else {
-                        $coverNameA = $logA.Port
-                        $coverNameB = $logB.Port
-                    }
-
-                    Write-Host "  Cover: $coverNameA cover generation $statusA, $coverNameB cover generation $statusB" -ForegroundColor Yellow
+                    Write-Host "  Cover: $shortNameA cover generation $statusA, $shortNameB cover generation $statusB" -ForegroundColor Yellow
                 }
             }
 
@@ -2066,13 +2071,18 @@ function Start-AnalyzeLogs {
         $resultNameA = $shortNameA
         $resultNameB = $shortNameB
 
+        # [!] if the overall winner has any unfair pages
+        $resultWinner = if ($avgDiff -lt 0) { $winnerA } else { $winnerB }
+        $resultHasUnfair = $pagesWithWarnings | Where-Object { ($_.Winner -replace " \[!\]", "") -eq $resultWinner }
+        $resultWarning = if ($resultHasUnfair) { " [!]" } else { "" }
+
         # Check if difference is statistically significant (> 1%)
         if ([Math]::Abs($avgPercent) -lt 1) {
             Write-Host "  Result: TIE (statistically insignificant difference: $([Math]::Round([Math]::Abs($avgDiff), 1)) ms, $([Math]::Abs($avgPercent))%)" -ForegroundColor Yellow
         } elseif ($avgDiff -lt 0) {
-            Write-Host "  Result: $resultNameA is $([Math]::Round([Math]::Abs($avgDiff), 1)) ms faster than $resultNameB ($([Math]::Abs($avgPercent))%)" -ForegroundColor Green
+            Write-WithWarning "  Result: $resultNameA is $([Math]::Round([Math]::Abs($avgDiff), 1)) ms faster than $resultNameB ($([Math]::Abs($avgPercent))%)$resultWarning" "Green"
         } elseif ($avgDiff -gt 0) {
-            Write-Host "  Result: $resultNameB is $([Math]::Round([Math]::Abs($avgDiff), 1)) ms faster than $resultNameA ($([Math]::Abs($avgPercent))%)" -ForegroundColor Blue
+            Write-WithWarning "  Result: $resultNameB is $([Math]::Round([Math]::Abs($avgDiff), 1)) ms faster than $resultNameA ($([Math]::Abs($avgPercent))%)$resultWarning" "Blue"
         } else {
             Write-Host "  Result: TIE (equal performance)" -ForegroundColor Yellow
         }
@@ -2160,10 +2170,12 @@ function Start-AnalyzeLogs {
         $consistencyNameA = $shortNameA
         $consistencyNameB = $shortNameB
 
+        $cvLabelWidth = [Math]::Max($consistencyNameA.Length, $consistencyNameB.Length)
+
         Write-Host ""
         Write-Host "Consistency Analysis:" -ForegroundColor Cyan
-        Write-Host "  ${consistencyNameA}: Coef. of Variation = $([Math]::Round($cvA, 1))%" -ForegroundColor $(if ($cvA -lt 20) { "Green" } elseif ($cvA -lt 40) { "Yellow" } else { "Red" })
-        Write-Host "  ${consistencyNameB}: Coef. of Variation = $([Math]::Round($cvB, 1))%" -ForegroundColor $(if ($cvB -lt 20) { "Green" } elseif ($cvB -lt 40) { "Yellow" } else { "Red" })
+        Write-Host "  $($consistencyNameA.PadRight($cvLabelWidth)): Coef. of Variation = $([Math]::Round($cvA, 1))%" -ForegroundColor $(if ($cvA -lt 20) { "Green" } elseif ($cvA -lt 40) { "Yellow" } else { "Red" })
+        Write-Host "  $($consistencyNameB.PadRight($cvLabelWidth)): Coef. of Variation = $([Math]::Round($cvB, 1))%" -ForegroundColor $(if ($cvB -lt 20) { "Green" } elseif ($cvB -lt 40) { "Yellow" } else { "Red" })
         Write-Host ""
     }
 
@@ -2187,29 +2199,41 @@ function Start-AnalyzeLogs {
 
             Write-Host "${sectionTitle}:" -ForegroundColor Cyan
 
-            # Check for warnings
-            $mostImprovedHasWarning  = $mostImproved.Winner  -like "*[!]*"
-            $leastImprovedHasWarning = $leastImproved.Winner -like "*[!]*"
-            $hasUnfairComparison = $mostImprovedHasWarning -or $leastImprovedHasWarning
+            # Determine if [!] is misleading: winner did less work (failed cover or fewer images)
+            # Most improved: B won (most negative diff)
+            if ($mostImproved.Page -like "Cover*" -and $logB.CoverGenerationTime) {
+                $mostIsMisleading = -not $logB.CoverGenerationTime.Success  # misleading if B (winner) failed
+            } else {
+                $mostIsMisleading = [int]$mostImproved.$imgColB -lt [int]$mostImproved.$imgColA
+            }
+
+            # Regression: A won (most positive diff)
+            if ($leastImproved.Page -like "Cover*" -and $logA.CoverGenerationTime) {
+                $leastIsMisleading = -not $logA.CoverGenerationTime.Success  # misleading if A (winner) failed
+            } else {
+                $leastIsMisleading = [int]$leastImproved.$imgColA -lt [int]$leastImproved.$imgColB
+            }
+
+            $impactLabelW = "Least improved".Length  # = 14, widest label
 
             # Most improved: B had the most negative diff
-            $pageDisplay = if ($mostImproved.Page -like "Cover*") { $mostImproved.Page } else { "Page $($mostImproved.Page)" }
+            $pageDisplay = if ($mostImproved.Page -like "Cover*") { if ($mostIsMisleading) { "Cover [!]" } else { "Cover" } } else { "Page $($mostImproved.Page)" }
             if ([Math]::Abs($mostImprovedPercent) -gt 1) {
-                $warningText = if ($mostImprovedHasWarning) { " [!]" } else { "" }
-                Write-Host "  Most improved:  $pageDisplay ($displayNameB) is $([Math]::Abs($mostImproved.Diff_ms))ms faster ($($mostImproved.Percent))$warningText" -ForegroundColor Green
+                $warningText = if ($mostIsMisleading) { " [!]" } else { "" }
+                Write-WithWarning "  $("Most improved".PadRight($impactLabelW)): $pageDisplay ($displayNameB) is $([Math]::Abs($mostImproved.Diff_ms))ms faster ($($mostImproved.Percent))$warningText" "Green"
             } else {
-                Write-Host "  Most improved:  $pageDisplay ($displayNameB) is $([Math]::Abs($mostImproved.Diff_ms))ms faster ($($mostImproved.Percent)) - statistically insignificant" -ForegroundColor Gray
+                Write-Host "  $("Most improved".PadRight($impactLabelW)): $pageDisplay ($displayNameB) is $([Math]::Abs($mostImproved.Diff_ms))ms faster ($($mostImproved.Percent)) - statistically insignificant" -ForegroundColor Gray
             }
 
             # Worst case for B: regression or least improved
-            $pageDisplay = if ($leastImproved.Page -like "Cover*") { $leastImproved.Page } else { "Page $($leastImproved.Page)" }
+            $pageDisplay = if ($leastImproved.Page -like "Cover*") { if ($leastIsMisleading) { "Cover [!]" } else { "Cover" } } else { "Page $($leastImproved.Page)" }
             if ($gotWorse -and $leastImprovedPercent -gt 1) {
-                $warningText = if ($leastImprovedHasWarning) { " [!]" } else { "" }
-                Write-Host "  Regression:     $pageDisplay ($displayNameB) is $($leastImproved.Diff_ms)ms SLOWER ($($leastImproved.Percent))$warningText" -ForegroundColor Red
+                $warningText = if ($leastIsMisleading) { " [!]" } else { "" }
+                Write-WithWarning "  $("Regression".PadRight($impactLabelW)): $pageDisplay ($displayNameB) is $($leastImproved.Diff_ms)ms SLOWER ($($leastImproved.Percent))$warningText" "Red"
             } elseif ($gotWorse) {
-                Write-Host "  Regression:     $pageDisplay ($displayNameB) is $($leastImproved.Diff_ms)ms slower ($($leastImproved.Percent)) - statistically insignificant" -ForegroundColor Gray
+                Write-Host "  $("Regression".PadRight($impactLabelW)): $pageDisplay ($displayNameB) is $($leastImproved.Diff_ms)ms slower ($($leastImproved.Percent)) - statistically insignificant" -ForegroundColor Gray
             } else {
-                Write-Host "  Least improved: $pageDisplay ($displayNameB) is only $([Math]::Abs($leastImproved.Diff_ms))ms faster ($($leastImproved.Percent))" -ForegroundColor Yellow
+                Write-Host "  $("Least improved".PadRight($impactLabelW)): $pageDisplay ($displayNameB) is only $([Math]::Abs($leastImproved.Diff_ms))ms faster ($($leastImproved.Percent))" -ForegroundColor Yellow
             }
         } else {
             # Same book type: Device comparison
@@ -2228,8 +2252,8 @@ function Start-AnalyzeLogs {
             $bestWarningText = if ($bestCaseHasWarning) { " [!]" } else { "" }
             $worstWarningText = if ($worstCaseHasWarning) { " [!]" } else { "" }
 
-            Write-Host "  Best performer:  Page $($bestCase.Page) ($displayNameA) faster by $($bestCase.Diff_ms)ms ($($bestCase.Percent))$bestWarningText" -ForegroundColor Green
-            Write-Host "  Worst performer: Page $($worstCase.Page) ($displayNameB) faster by $($worstCase.Diff_ms)ms ($($worstCase.Percent))$worstWarningText" -ForegroundColor $(if ([Math]::Abs($worstCase.Diff_ms) -gt 1000) { "Red" } else { "Yellow" })
+            Write-WithWarning "  Best performer:  Page $($bestCase.Page) ($displayNameA) faster by $($bestCase.Diff_ms)ms ($($bestCase.Percent))$bestWarningText" "Green"
+            Write-WithWarning "  Worst performer: Page $($worstCase.Page) ($displayNameB) faster by $($worstCase.Diff_ms)ms ($($worstCase.Percent))$worstWarningText" $(if ([Math]::Abs($worstCase.Diff_ms) -gt 1000) { "Red" } else { "Yellow" })
 
             # Show warning if any highlighted page has issues
             if ($bestCaseHasWarning -or $worstCaseHasWarning) {
@@ -2311,9 +2335,9 @@ function Start-AnalyzeLogs {
             if ($percentSaved -gt 1) {
                 $unfairMarker = if ($hasUnfairComparisonInOptimization) { " [!]" } else { "" }
                 if ($totalTimeSaved -lt 0) {
-                    Write-Host "  $($label3.PadRight($maxLabelWidth)): $($timeSaved_formatted) ($percentSaved%) - $displayNameA is faster$unfairMarker" -ForegroundColor Green
+                    Write-WithWarning "  $($label3.PadRight($maxLabelWidth)): $($timeSaved_formatted) ($percentSaved%) - $displayNameA is faster$unfairMarker" "Green"
                 } else {
-                    Write-Host "  $($label3.PadRight($maxLabelWidth)): $($timeSaved_formatted) ($percentSaved%) - $displayNameB is faster$unfairMarker" -ForegroundColor Green
+                    Write-WithWarning "  $($label3.PadRight($maxLabelWidth)): $($timeSaved_formatted) ($percentSaved%) - $displayNameB is faster$unfairMarker" "Green"
                 }
             } else {
                 Write-Host "  $($label3.PadRight($maxLabelWidth)): $($timeSaved_formatted) ($percentSaved%) - statistically insignificant" -ForegroundColor Gray
@@ -2649,10 +2673,10 @@ function Start-AnalyzeLogs {
                         Write-Host $row.Winner -ForegroundColor Gray
                     } elseif ($bareWinnerChart -eq $winnerA) {
                         $winnerShort = if ($winnerA.Length -gt 8) { $winnerA.Substring(0, 6) + ".." } else { $winnerA }
-                        Write-Host "$winnerShort$(if ($row.Winner -like '*[!]*') { ' [!]' })" -ForegroundColor Green
+                        Write-WithWarning "$winnerShort$(if ($row.Winner -like '*[!]*') { ' [!]' })" "Green"
                     } else {
                         $winnerShort = if ($winnerB.Length -gt 8) { $winnerB.Substring(0, 6) + ".." } else { $winnerB }
-                        Write-Host "$winnerShort$(if ($row.Winner -like '*[!]*') { ' [!]' })" -ForegroundColor Blue
+                        Write-WithWarning "$winnerShort$(if ($row.Winner -like '*[!]*') { ' [!]' })" "Blue"
                     }
                 }
                 Write-Host ""
