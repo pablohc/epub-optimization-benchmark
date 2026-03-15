@@ -153,7 +153,10 @@ function Start-SingleDeviceCapture {
     Write-Host "Output file:" -ForegroundColor Green
     Write-Host "  $fileName" -ForegroundColor Gray
     Write-Host ""
-    Write-Host "Press ENTER to start, ESC or Q to stop" -ForegroundColor Yellow
+    Write-Host "NOTE: Please RESTART the device to capture firmware version" -ForegroundColor Yellow
+    Write-Host "      Device restart is required for firmware detection" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Press ENTER when device is restarting..." -ForegroundColor Yellow
     Read-Host
 
     Clear-Host
@@ -163,7 +166,7 @@ function Start-SingleDeviceCapture {
     Write-Host "  CAPTURE IN PROGRESS" -ForegroundColor Cyan
     Write-Host "========================================" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "Opening port (device will restart)..." -ForegroundColor Cyan
+    Write-Host "Opening port..." -ForegroundColor Cyan
 
     # Open port and capture
     $captureSuccess = $false
@@ -173,10 +176,6 @@ function Start-SingleDeviceCapture {
         Write-Host ("Opening {0}..." -f $ComPort) -NoNewline
         $port.Open()
         Write-Host " [OK]" -ForegroundColor Green
-
-        Write-Host ""
-        Write-Host "Waiting for restart (3 seconds)..." -ForegroundColor Yellow
-        Start-Sleep -Seconds 3
 
         Write-Host "Creating writer..." -ForegroundColor Cyan
         $writer = New-Object System.IO.StreamWriter($fileName, $false, [System.Text.Encoding]::UTF8)
@@ -665,7 +664,10 @@ function Start-DualDeviceCapture {
         Write-Host "  LEFT device: $fileA" -ForegroundColor Gray
         Write-Host "  RIGHT device: $fileB" -ForegroundColor Gray
         Write-Host ""
-        Write-Host "Press ENTER to start, ESC or Q to stop" -ForegroundColor Yellow
+        Write-Host "NOTE: Please RESTART both devices to capture firmware versions" -ForegroundColor Yellow
+        Write-Host "      Device restart is required for firmware detection" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "Press ENTER when both devices are restarting..." -ForegroundColor Yellow
         Read-Host
 
         Clear-Host
@@ -675,7 +677,7 @@ function Start-DualDeviceCapture {
         Write-Host "  CAPTURE IN PROGRESS" -ForegroundColor Cyan
         Write-Host "========================================" -ForegroundColor Cyan
         Write-Host ""
-        Write-Host "Opening ports (devices will restart)..." -ForegroundColor Cyan
+        Write-Host "Opening ports..." -ForegroundColor Cyan
 
         $captureSuccess = $false
         try {
@@ -689,10 +691,6 @@ function Start-DualDeviceCapture {
             Write-Host "Opening $rightPort..." -NoNewline
             $portB.Open()
             Write-Host " [OK]" -ForegroundColor Green
-
-            Write-Host ""
-            Write-Host "Waiting for restart (3 seconds)..." -ForegroundColor Yellow
-            Start-Sleep -Seconds 3
 
             Write-Host "Creating writers..." -ForegroundColor Cyan
             $writerA = New-Object System.IO.StreamWriter($fileA, $false, [System.Text.Encoding]::UTF8)
