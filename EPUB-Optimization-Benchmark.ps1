@@ -182,18 +182,23 @@ function Start-SingleDeviceCapture {
         $writer = New-Object System.IO.StreamWriter($fileName, $false, [System.Text.Encoding]::UTF8)
         $writer.AutoFlush = $true
 
-        # Write metadata header
-        $metadata = "CAPTURE_METADATA: Type=${sanitizedBook}, Device=$ComPort, Timestamp=${timestamp}"
-        $writer.WriteLine($metadata)
-
         Write-Host "[OK] Capturing... Press ESC or Q to stop" -ForegroundColor Green
         Write-Host ""
+
+        # Firmware detection variables
+        $initialBuffer = New-Object System.Text.StringBuilder
+        $firmwareVersion = "Unknown"
+        $firmwareBranch = "Unknown"
+        $firmwareDetected = $false
+        $maxFirmwareWait = 10  # Wait up to 10 seconds for firmware info
+        $firmwareSearchStartTime = Get-Date
 
         $count = 0
         $pagesDetected = 0
         $coverStatus = $null
         $lastDot = Get-Date
         $stopRequested = $false
+        $metadataWritten = $false
 
         while (-not $stopRequested) {
             # Check for key press to stop capture
@@ -207,7 +212,51 @@ function Start-SingleDeviceCapture {
 
             if ($port.BytesToRead -gt 0) {
                 $data = $port.ReadExisting()
-                $writer.Write($data)
+
+                # Buffer initial data for firmware detection (before writing to file)
+                if (-not $metadataWritten) {
+                    $initialBuffer.Append($data) | Out-Null
+
+                    # Try to detect firmware version in incoming data
+                    if (-not $firmwareDetected) {
+                        $newLines = $data -split "`r?`n"
+                        foreach ($line in $newLines) {
+                            if ($line -match "\[DBG\]\s+\[MAIN\]\s+Starting\s+CrossPoint\s+version\s+([\d\.]+(?:-[a-z]+)?)(?:\+([^ \t]+))?") {
+                                $firmwareVersion = $matches[1]
+                                if ($matches[2]) {
+                                    $firmwareBranch = $matches[2]
+                                } else {
+                                    $firmwareBranch = "master"
+                                }
+                                $firmwareDetected = $true
+                                Write-Host ""
+                                Write-Host "Detected Firmware: $firmwareVersion (branch: $firmwareBranch)" -ForegroundColor Cyan
+                                break
+                            }
+                        }
+                    }
+
+                    # Check if we should write metadata now (firmware detected or timeout)
+                    $timeSinceStart = (Get-Date) - $firmwareSearchStartTime
+                    if ($firmwareDetected -or $timeSinceStart.TotalSeconds -gt $maxFirmwareWait) {
+                        # Write metadata header with firmware info
+                        $metadata = "CAPTURE_METADATA: Type=${sanitizedBook}, Device=$ComPort, Timestamp=${timestamp}, Firmware=${firmwareVersion}, Branch=${firmwareBranch}"
+                        $writer.WriteLine($metadata)
+
+                        # Write buffered data
+                        $writer.Write($initialBuffer.ToString())
+                        $metadataWritten = $true
+
+                        if (-not $firmwareDetected) {
+                            Write-Host ""
+                            Write-Host "Firmware detection timeout - using 'Unknown'" -ForegroundColor Yellow
+                        }
+                    }
+                } else {
+                    # Normal mode: write directly to file
+                    $writer.Write($data)
+                }
+
                 $count += $data.Length
 
                 # Count pages rendered using the same logic as the analyzer
@@ -650,13 +699,20 @@ function Start-DualDeviceCapture {
             $writerA.AutoFlush = $true
             $writerB.AutoFlush = $true
 
-            $metadataA = "CAPTURE_METADATA: Type=${sanitizedBookA}, Device=$leftPort, Timestamp=${timestamp}"
-            $metadataB = "CAPTURE_METADATA: Type=${sanitizedBookB}, Device=$rightPort, Timestamp=${timestamp}"
-            $writerA.WriteLine($metadataA)
-            $writerB.WriteLine($metadataB)
-
             Write-Host "[OK] Capturing... Press ESC or Q to stop" -ForegroundColor Green
             Write-Host ""
+
+            # Firmware detection variables for dual capture
+            $initialBufferA = New-Object System.Text.StringBuilder
+            $initialBufferB = New-Object System.Text.StringBuilder
+            $firmwareVersionA = "Unknown"
+            $firmwareBranchA = "Unknown"
+            $firmwareVersionB = "Unknown"
+            $firmwareBranchB = "Unknown"
+            $firmwareDetectedA = $false
+            $firmwareDetectedB = $false
+            $maxFirmwareWait = 10
+            $firmwareSearchStartTime = Get-Date
 
             $countA = 0
             $countB = 0
@@ -666,6 +722,8 @@ function Start-DualDeviceCapture {
             $coverStatusB = $null
             $lastDot = Get-Date
             $stopRequested = $false
+            $metadataWrittenA = $false
+            $metadataWrittenB = $false
 
             while (-not $stopRequested) {
                 # Check for key press to stop capture
@@ -679,7 +737,51 @@ function Start-DualDeviceCapture {
 
                 if ($portA.BytesToRead -gt 0) {
                     $data = $portA.ReadExisting()
-                    $writerA.Write($data)
+
+                    # Buffer initial data for firmware detection (before writing to file)
+                    if (-not $metadataWrittenA) {
+                        $initialBufferA.Append($data) | Out-Null
+
+                        # Try to detect firmware version in incoming data
+                        if (-not $firmwareDetectedA) {
+                            $newLines = $data -split "`r?`n"
+                            foreach ($line in $newLines) {
+                                if ($line -match "\[DBG\]\s+\[MAIN\]\s+Starting\s+CrossPoint\s+version\s+([\d\.]+(?:-[a-z]+)?)(?:\+([^ \t]+))?") {
+                                    $firmwareVersionA = $matches[1]
+                                    if ($matches[2]) {
+                                        $firmwareBranchA = $matches[2]
+                                    } else {
+                                        $firmwareBranchA = "master"
+                                    }
+                                    $firmwareDetectedA = $true
+                                    Write-Host ""
+                                    Write-Host "LEFT Device Detected Firmware: $firmwareVersionA (branch: $firmwareBranchA)" -ForegroundColor Cyan
+                                    break
+                                }
+                            }
+                        }
+
+                        # Check if we should write metadata now (firmware detected or timeout)
+                        $timeSinceStart = (Get-Date) - $firmwareSearchStartTime
+                        if ($firmwareDetectedA -or $timeSinceStart.TotalSeconds -gt $maxFirmwareWait) {
+                            # Write metadata header with firmware info
+                            $metadataA = "CAPTURE_METADATA: Type=${sanitizedBookA}, Device=$leftPort, Timestamp=${timestamp}, Firmware=${firmwareVersionA}, Branch=${firmwareBranchA}"
+                            $writerA.WriteLine($metadataA)
+
+                            # Write buffered data
+                            $writerA.Write($initialBufferA.ToString())
+                            $metadataWrittenA = $true
+
+                            if (-not $firmwareDetectedA) {
+                                Write-Host ""
+                                Write-Host "LEFT Device Firmware detection timeout - using 'Unknown'" -ForegroundColor Yellow
+                            }
+                        }
+                    } else {
+                        # Normal mode: write directly to file
+                        $writerA.Write($data)
+                    }
+
                     $countA += $data.Length
 
                     # Count pages rendered using the same logic as the analyzer
@@ -699,7 +801,51 @@ function Start-DualDeviceCapture {
 
                 if ($portB.BytesToRead -gt 0) {
                     $data = $portB.ReadExisting()
-                    $writerB.Write($data)
+
+                    # Buffer initial data for firmware detection (before writing to file)
+                    if (-not $metadataWrittenB) {
+                        $initialBufferB.Append($data) | Out-Null
+
+                        # Try to detect firmware version in incoming data
+                        if (-not $firmwareDetectedB) {
+                            $newLines = $data -split "`r?`n"
+                            foreach ($line in $newLines) {
+                                if ($line -match "\[DBG\]\s+\[MAIN\]\s+Starting\s+CrossPoint\s+version\s+([\d\.]+(?:-[a-z]+)?)(?:\+([^ \t]+))?") {
+                                    $firmwareVersionB = $matches[1]
+                                    if ($matches[2]) {
+                                        $firmwareBranchB = $matches[2]
+                                    } else {
+                                        $firmwareBranchB = "master"
+                                    }
+                                    $firmwareDetectedB = $true
+                                    Write-Host ""
+                                    Write-Host "RIGHT Device Detected Firmware: $firmwareVersionB (branch: $firmwareBranchB)" -ForegroundColor Cyan
+                                    break
+                                }
+                            }
+                        }
+
+                        # Check if we should write metadata now (firmware detected or timeout)
+                        $timeSinceStart = (Get-Date) - $firmwareSearchStartTime
+                        if ($firmwareDetectedB -or $timeSinceStart.TotalSeconds -gt $maxFirmwareWait) {
+                            # Write metadata header with firmware info
+                            $metadataB = "CAPTURE_METADATA: Type=${sanitizedBookB}, Device=$rightPort, Timestamp=${timestamp}, Firmware=${firmwareVersionB}, Branch=${firmwareBranchB}"
+                            $writerB.WriteLine($metadataB)
+
+                            # Write buffered data
+                            $writerB.Write($initialBufferB.ToString())
+                            $metadataWrittenB = $true
+
+                            if (-not $firmwareDetectedB) {
+                                Write-Host ""
+                                Write-Host "RIGHT Device Firmware detection timeout - using 'Unknown'" -ForegroundColor Yellow
+                            }
+                        }
+                    } else {
+                        # Normal mode: write directly to file
+                        $writerB.Write($data)
+                    }
+
                     $countB += $data.Length
 
                     # Count pages rendered using the same logic as the analyzer
@@ -942,6 +1088,8 @@ function Parse-LogFilename {
         Type = $null
         BookName = $null
         Timestamp = $null
+        Firmware = "Unknown"
+        Branch = "Unknown"
         IsValid = $false
     }
 
@@ -958,6 +1106,19 @@ function Parse-LogFilename {
         # Validate port format
         if ($result.Port -match '^COM\d+$') {
             $result.IsValid = $true
+        }
+    }
+
+    # Extract firmware and branch from CAPTURE_METADATA line
+    if (Test-Path $FilePath) {
+        try {
+            $firstLine = Get-Content $FilePath -First 1
+            if ($firstLine -match 'CAPTURE_METADATA:.*Firmware=([^,]+),\s*Branch=([^\s]+)') {
+                $result.Firmware = $matches[1]
+                $result.Branch = $matches[2]
+            }
+        } catch {
+            # Keep default values if file can't be read
         }
     }
 
@@ -1293,7 +1454,9 @@ function Start-AnalyzeLogs {
             $coverStatus = if ($coverTime.Success) { "SUCCESS" } else { "FAILED" }
             $summary += " + cover ($coverStatus)"
         }
+        $firmwareInfo = "$($log.Firmware) [$($log.Branch)]"
         Write-Host "  $($log.Port) ($($log.Type)): $summary" -ForegroundColor Gray
+        Write-Host "     Firmware: $firmwareInfo" -ForegroundColor DarkGray
     }
 
     Write-Host ""
@@ -1570,17 +1733,17 @@ function Start-AnalyzeLogs {
 
         # Determine display names and comparison title
         if ($uniqueTypes -gt 1) {
-            $displayNameA = $logA.Type
-            $displayNameB = $logB.Type
+            $displayNameA = "$($logA.Type) [$($logA.Firmware)]"
+            $displayNameB = "$($logB.Type) [$($logB.Firmware)]"
             $comparisonTitle = "Book Version"
         } elseif ($uniquePorts -eq 1 -and $uniqueTypes -eq 1) {
             # Same device, same book = different tests
-            $displayNameA = "Test 1 ($($logA.Port))"
-            $displayNameB = "Test 2 ($($logB.Port))"
+            $displayNameA = "Test 1 ($($logA.Port)) [$($logA.Firmware)]"
+            $displayNameB = "Test 2 ($($logB.Port)) [$($logB.Firmware)]"
             $comparisonTitle = "Same Device Repeatability Test"
         } else {
-            $displayNameA = "Device A ($($logA.Port))"
-            $displayNameB = "Device B ($($logB.Port))"
+            $displayNameA = "$($logA.Port) [$($logA.Firmware)]"
+            $displayNameB = "$($logB.Port) [$($logB.Firmware)]"
             $comparisonTitle = "Device Performance"
         }
 
@@ -1841,14 +2004,14 @@ function Start-AnalyzeLogs {
 
         # Determine display names for consistency analysis
         if ($uniqueTypes -gt 1) {
-            $consistencyNameA = $logA.Type
-            $consistencyNameB = $logB.Type
+            $consistencyNameA = "$($logA.Type) [$($logA.Firmware)]"
+            $consistencyNameB = "$($logB.Type) [$($logB.Firmware)]"
         } elseif ($uniquePorts -eq 1 -and $uniqueTypes -eq 1) {
-            $consistencyNameA = "Test 1"
-            $consistencyNameB = "Test 2"
+            $consistencyNameA = "Test 1 [$($logA.Firmware)]"
+            $consistencyNameB = "Test 2 [$($logB.Firmware)]"
         } else {
-            $consistencyNameA = "$($logA.Port) ($($logA.Type))"
-            $consistencyNameB = "$($logB.Port) ($($logB.Type))"
+            $consistencyNameA = "$($logA.Port) [$($logA.Firmware)]"
+            $consistencyNameB = "$($logB.Port) [$($logB.Firmware)]"
         }
 
         Write-Host ""
@@ -1862,8 +2025,8 @@ function Start-AnalyzeLogs {
     if ($logsWithTimes.Count -eq 2) {
         # Determine display names based on comparison type
         if ($uniqueTypes -gt 1) {
-            $displayNameA = $logA.Type
-            $displayNameB = $logB.Type
+            $displayNameA = "$($logA.Type) [$($logA.Firmware)]"
+            $displayNameB = "$($logB.Type) [$($logB.Firmware)]"
             $sectionTitle = "Optimization Impact"
 
             # Find pages where OPTIMIZED improved the most
@@ -1907,8 +2070,8 @@ function Start-AnalyzeLogs {
             }
         } else {
             # Same book type: Device comparison
-            $displayNameA = "Device A"
-            $displayNameB = "Device B"
+            $displayNameA = "$($logA.Port) [$($logA.Firmware)]"
+            $displayNameB = "$($logB.Port) [$($logB.Firmware)]"
             $sectionTitle = "Performance Highlights"
 
             # Traditional best/worst based on pure difference

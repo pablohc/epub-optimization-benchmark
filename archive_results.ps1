@@ -1,0 +1,264 @@
+<#
+.SYNOPSIS
+    Archives EPUB Optimization Benchmark test results
+
+.DESCRIPTION
+    Moves recent logs to organized statistical testing structure.
+    Creates basic metadata and README for each tested book.
+
+.PARAMETER Group
+    Group to which the book belongs:
+    - group_1_text_only
+    - group_2_intermediate
+    - group_3_many_images
+
+.PARAMETER BookID
+    Unique book identifier (eg: book_01_novel_example)
+
+.PARAMETER BookName
+    Descriptive book name (eg: "Example Novel - Author")
+
+.PARAMETER BenchmarkPath
+    Path to benchmark repository (default: current directory)
+
+.PARAMETER OutputPath
+    Base path for statistical testing output
+
+.EXAMPLE
+    .\archive_results.ps1 -Group "group_1_text_only" -BookID "book_01_novel" -BookName "One Hundred Years of Solitude - Garcia Marquez"
+#>
+
+param(
+    [Parameter(Mandatory=$true)]
+    [ValidateSet("group_1_text_only", "group_2_intermediate", "group_3_many_images")]
+    [string]$Group,
+
+    [Parameter(Mandatory=$true)]
+    [string]$BookID,
+
+    [Parameter(Mandatory=$true)]
+    [string]$BookName,
+
+    [string]$BenchmarkPath = (Split-Path -Parent $PSScriptRoot),
+
+    [string]$OutputPath = "C:\Users\Pablo\Downloads\eBooks\PR-1224\statistical_testing"
+)
+
+# Error handling
+$ErrorActionPreference = "Stop"
+
+# Paths
+$logsDir = Join-Path $BenchmarkPath "logs"
+$destBase = Join-Path $OutputPath $Group
+$destPath = Join-Path $destBase $BookID
+
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "  RESULTS ARCHIVER" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+
+# Validate logs directory exists
+if (-not (Test-Path $logsDir)) {
+    Write-Error "Logs directory does not exist: $logsDir"
+    exit 1
+}
+
+# Create destination structure
+Write-Host "Creating destination structure..." -ForegroundColor Cyan
+$originalPath = Join-Path $destPath "original"
+$optimizedPath = Join-Path $destPath "optimized"
+
+New-Item -ItemType Directory -Force -Path $originalPath | Out-Null
+New-Item -ItemType Directory -Force -Path $optimizedPath | Out-Null
+
+Write-Host "  Destination: $destPath" -ForegroundColor Green
+Write-Host ""
+
+# Get most recent logs
+Write-Host "Searching for recent logs..." -ForegroundColor Cyan
+
+$latestLogs = Get-ChildItem $logsDir\COM*_*.txt |
+              Sort-Object LastWriteTime -Descending |
+              Select-Object -First 2
+
+if ($latestLogs.Count -lt 2) {
+    Write-Error "Not enough recent logs found (2 required)"
+    exit 1
+}
+
+# Show found logs
+Write-Host "  Found logs:" -ForegroundColor Green
+foreach ($log in $latestLogs) {
+    $time = $log.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")
+    Write-Host "    - $($log.Name) ($time)" -ForegroundColor White
+}
+Write-Host ""
+
+# Determine which is original and which is optimized by filename
+$originalLog = $null
+$optimizedLog = $null
+
+foreach ($log in $latestLogs) {
+    if ($log.Name -match "ORIGINAL") {
+        $originalLog = $log
+    } elseif ($log.Name -match "OPTIMIZED|MOZJPEG") {
+        $optimizedLog = $log
+    }
+}
+
+# If cannot determine by name, use oldest as original
+if (-not $originalLog -or -not $optimizedLog) {
+    Write-Warning "Could not determine original/optimized by filename"
+    Write-Warning "Using timestamp to determine..."
+
+    $sorted = $latestLogs | Sort-Object LastWriteTime
+    $originalLog = $sorted[0]
+    $optimizedLog = $sorted[1]
+
+    Write-Host "  Original (oldest): $($originalLog.Name)" -ForegroundColor Yellow
+    Write-Host "  Optimized (newest): $($optimizedLog.Name)" -ForegroundColor Yellow
+    Write-Host ""
+}
+
+# Copy logs
+Write-Host "Copying logs..." -ForegroundColor Cyan
+
+Copy-Item $originalLog.FullName "$originalPath\log_serial.txt" -Force
+Write-Host "  ✓ Original: $($originalLog.Name)" -ForegroundColor Green
+
+Copy-Item $optimizedLog.FullName "$optimizedPath\log_serial.txt" -Force
+Write-Host "  ✓ Optimized: $($optimizedLog.Name)" -ForegroundColor Green
+Write-Host ""
+
+# Copy analysis CSV if exists
+$latestCSV = Get-ChildItem $logsDir\analysis_*.csv |
+             Sort-Object LastWriteTime -Descending |
+             Select-Object -First 1
+
+if ($latestCSV) {
+    Copy-Item $latestCSV.FullName "$destPath\analysis.csv" -Force
+    Write-Host "  ✓ Analysis: $($latestCSV.Name)" -ForegroundColor Green
+    Write-Host ""
+}
+
+# Create README with metadata
+Write-Host "Creating metadata..." -ForegroundColor Cyan
+
+$testDate = Get-Date -Format "yyyy-MM-dd"
+$testTimestamp = Get-Date -Format "HH:mm:ss"
+
+$readme = @"
+# $BookName
+
+**Group:** $Group
+**ID:** $BookID
+**Test Date:** $testDate
+**Time:** $testTimestamp
+
+---
+
+## 📁 Files
+
+- **[Original log](original/log_serial.txt)** - Capture from device with original EPUB
+- **[Optimized log](optimized/log_serial.txt)** - Capture from device with optimized EPUB
+- **[Analysis](analysis.csv)** - Comparison generated by EPUB Benchmark Tool (if exists)
+
+---
+
+## 📊 Capture Information
+
+### Original
+- **File:** $($originalLog.Name)
+- **Timestamp:** $($originalLog.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss"))
+- **Size:** $([math]::Round($originalLog.Length / 1KB, 2)) KB
+
+### Optimized
+- **File:** $($optimizedLog.Name)
+- **Timestamp:** $($optimizedLog.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss"))
+- **Size:** $([math]::Round($optimizedLog.Length / 1KB, 2)) KB
+
+---
+
+## 🔍 Preliminary Results
+
+*This section will be completed during final statistical analysis*
+
+- **Opening improvement:** TBD%
+- **Time saved:** TBD ms
+- **Pages analyzed:** TBD
+
+---
+
+## 📝 Notes
+
+*Add manual observations here:*
+- Visual quality observed:
+- Unusual behavior:
+- Technical issues:
+
+---
+
+**Archived by:** EPUB Benchmark Archiver
+**Script:** archive_results.ps1
+**Archive date:** $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+"@
+
+Set-Content "$destPath\README.md" $readme -Encoding UTF8
+Write-Host "  ✓ README created" -ForegroundColor Green
+Write-Host ""
+
+# Summary
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "  ✅ ARCHIVING COMPLETED" -ForegroundColor Green
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Book:" -ForegroundColor White
+Write-Host "  ID: $BookID" -ForegroundColor Cyan
+Write-Host "  Name: $BookName" -ForegroundColor Cyan
+Write-Host "  Group: $Group" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Location:" -ForegroundColor White
+Write-Host "  $destPath" -ForegroundColor Green
+Write-Host ""
+
+# Progress counter
+$progressPath = Join-Path $OutputPath "testing_progress.txt"
+$booksPerGroup = @{}
+
+if (Test-Path $progressPath) {
+    $progress = Get-Content $progressPath | ConvertFrom-Json
+    $booksPerGroup = $progress.books_per_group
+} else {
+    $booksPerGroup = @{
+        "group_1_text_only" = 0
+        "group_2_intermediate" = 0
+        "group_3_many_images" = 0
+    }
+}
+
+# Increment counter
+if ($booksPerGroup.ContainsKey($Group)) {
+    $booksPerGroup[$Group]++
+} else {
+    $booksPerGroup[$Group] = 1
+}
+
+# Save progress
+$progressData = @{
+    total_books = ($booksPerGroup.Values | Measure-Object -Sum).Sum
+    books_per_group = $booksPerGroup
+    last_update = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+}
+
+$progressData | ConvertTo-Json | Set-Content $progressPath
+
+Write-Host "Testing Progress:" -ForegroundColor Yellow
+Write-Host "  Text Only: $($booksPerGroup['group_1_text_only'])/5" -ForegroundColor White
+Write-Host "  Intermediate: $($booksPerGroup['group_2_intermediate'])/8" -ForegroundColor White
+Write-Host "  Many Images: $($booksPerGroup['group_3_many_images'])/7" -ForegroundColor White
+Write-Host "  TOTAL: $($progressData.total_books)/20" -ForegroundColor Cyan
+Write-Host ""
+
+Write-Host "✨ Ready for the next book!" -ForegroundColor Green
+Write-Host ""
