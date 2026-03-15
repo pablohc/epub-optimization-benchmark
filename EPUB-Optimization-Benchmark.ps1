@@ -239,8 +239,9 @@ function Start-SingleDeviceCapture {
                     # Check if we should write metadata now (firmware detected or timeout)
                     $timeSinceStart = (Get-Date) - $firmwareSearchStartTime
                     if ($firmwareDetected -or $timeSinceStart.TotalSeconds -gt $maxFirmwareWait) {
-                        # Write metadata header with firmware info
-                        $metadata = "CAPTURE_METADATA: Type=${sanitizedBook}, Device=$ComPort, Timestamp=${timestamp}, Firmware=${firmwareVersion}, Branch=${firmwareBranch}"
+                        # Write metadata header with combined firmware+branch info
+                        $firmwareCombined = "${firmwareVersion}+${firmwareBranch}"
+                        $metadata = "CAPTURE_METADATA: Type=${sanitizedBook}, Device=$ComPort, Timestamp=${timestamp}, Firmware+Branch=${firmwareCombined}"
                         $writer.WriteLine($metadata)
 
                         # Write buffered data
@@ -764,8 +765,9 @@ function Start-DualDeviceCapture {
                         # Check if we should write metadata now (firmware detected or timeout)
                         $timeSinceStart = (Get-Date) - $firmwareSearchStartTime
                         if ($firmwareDetectedA -or $timeSinceStart.TotalSeconds -gt $maxFirmwareWait) {
-                            # Write metadata header with firmware info
-                            $metadataA = "CAPTURE_METADATA: Type=${sanitizedBookA}, Device=$leftPort, Timestamp=${timestamp}, Firmware=${firmwareVersionA}, Branch=${firmwareBranchA}"
+                            # Write metadata header with combined firmware+branch info
+                            $firmwareCombinedA = "${firmwareVersionA}+${firmwareBranchA}"
+                            $metadataA = "CAPTURE_METADATA: Type=${sanitizedBookA}, Device=$leftPort, Timestamp=${timestamp}, Firmware+Branch=${firmwareCombinedA}"
                             $writerA.WriteLine($metadataA)
 
                             # Write buffered data
@@ -828,8 +830,9 @@ function Start-DualDeviceCapture {
                         # Check if we should write metadata now (firmware detected or timeout)
                         $timeSinceStart = (Get-Date) - $firmwareSearchStartTime
                         if ($firmwareDetectedB -or $timeSinceStart.TotalSeconds -gt $maxFirmwareWait) {
-                            # Write metadata header with firmware info
-                            $metadataB = "CAPTURE_METADATA: Type=${sanitizedBookB}, Device=$rightPort, Timestamp=${timestamp}, Firmware=${firmwareVersionB}, Branch=${firmwareBranchB}"
+                            # Write metadata header with combined firmware+branch info
+                            $firmwareCombinedB = "${firmwareVersionB}+${firmwareBranchB}"
+                            $metadataB = "CAPTURE_METADATA: Type=${sanitizedBookB}, Device=$rightPort, Timestamp=${timestamp}, Firmware+Branch=${firmwareCombinedB}"
                             $writerB.WriteLine($metadataB)
 
                             # Write buffered data
@@ -1088,8 +1091,7 @@ function Parse-LogFilename {
         Type = $null
         BookName = $null
         Timestamp = $null
-        Firmware = "Unknown"
-        Branch = "Unknown"
+        FirmwareBranch = "Unknown"
         IsValid = $false
     }
 
@@ -1109,16 +1111,15 @@ function Parse-LogFilename {
         }
     }
 
-    # Extract firmware and branch from CAPTURE_METADATA line
+    # Extract firmware+branch from CAPTURE_METADATA line
     if (Test-Path $FilePath) {
         try {
             $firstLine = Get-Content $FilePath -First 1
-            if ($firstLine -match 'CAPTURE_METADATA:.*Firmware=([^,]+),\s*Branch=([^\s]+)') {
-                $result.Firmware = $matches[1]
-                $result.Branch = $matches[2]
+            if ($firstLine -match 'CAPTURE_METADATA:.*Firmware\+Branch=([^\s]+)') {
+                $result.FirmwareBranch = $matches[1]
             }
         } catch {
-            # Keep default values if file can't be read
+            # Keep default value if file can't be read
         }
     }
 
@@ -1454,9 +1455,8 @@ function Start-AnalyzeLogs {
             $coverStatus = if ($coverTime.Success) { "SUCCESS" } else { "FAILED" }
             $summary += " + cover ($coverStatus)"
         }
-        $firmwareInfo = "$($log.Firmware) [$($log.Branch)]"
         Write-Host "  $($log.Port) ($($log.Type)): $summary" -ForegroundColor Gray
-        Write-Host "     Firmware: $firmwareInfo" -ForegroundColor DarkGray
+        Write-Host "     Firmware: $($log.FirmwareBranch)" -ForegroundColor DarkGray
     }
 
     Write-Host ""
@@ -1733,17 +1733,17 @@ function Start-AnalyzeLogs {
 
         # Determine display names and comparison title
         if ($uniqueTypes -gt 1) {
-            $displayNameA = "$($logA.Type) [$($logA.Firmware)]"
-            $displayNameB = "$($logB.Type) [$($logB.Firmware)]"
+            $displayNameA = "$($logA.Type) [$($logA.FirmwareBranch)]"
+            $displayNameB = "$($logB.Type) [$($logB.FirmwareBranch)]"
             $comparisonTitle = "Book Version"
         } elseif ($uniquePorts -eq 1 -and $uniqueTypes -eq 1) {
             # Same device, same book = different tests
-            $displayNameA = "Test 1 ($($logA.Port)) [$($logA.Firmware)]"
-            $displayNameB = "Test 2 ($($logB.Port)) [$($logB.Firmware)]"
+            $displayNameA = "Test 1 ($($logA.Port)) [$($logA.FirmwareBranch)]"
+            $displayNameB = "Test 2 ($($logB.Port)) [$($logB.FirmwareBranch)]"
             $comparisonTitle = "Same Device Repeatability Test"
         } else {
-            $displayNameA = "$($logA.Port) [$($logA.Firmware)]"
-            $displayNameB = "$($logB.Port) [$($logB.Firmware)]"
+            $displayNameA = "$($logA.Port) [$($logA.FirmwareBranch)]"
+            $displayNameB = "$($logB.Port) [$($logB.FirmwareBranch)]"
             $comparisonTitle = "Device Performance"
         }
 
@@ -2004,14 +2004,14 @@ function Start-AnalyzeLogs {
 
         # Determine display names for consistency analysis
         if ($uniqueTypes -gt 1) {
-            $consistencyNameA = "$($logA.Type) [$($logA.Firmware)]"
-            $consistencyNameB = "$($logB.Type) [$($logB.Firmware)]"
+            $consistencyNameA = "$($logA.Type) [$($logA.FirmwareBranch)]"
+            $consistencyNameB = "$($logB.Type) [$($logB.FirmwareBranch)]"
         } elseif ($uniquePorts -eq 1 -and $uniqueTypes -eq 1) {
-            $consistencyNameA = "Test 1 [$($logA.Firmware)]"
-            $consistencyNameB = "Test 2 [$($logB.Firmware)]"
+            $consistencyNameA = "Test 1 [$($logA.FirmwareBranch)]"
+            $consistencyNameB = "Test 2 [$($logB.FirmwareBranch)]"
         } else {
-            $consistencyNameA = "$($logA.Port) [$($logA.Firmware)]"
-            $consistencyNameB = "$($logB.Port) [$($logB.Firmware)]"
+            $consistencyNameA = "$($logA.Port) [$($logA.FirmwareBranch)]"
+            $consistencyNameB = "$($logB.Port) [$($logB.FirmwareBranch)]"
         }
 
         Write-Host ""
@@ -2025,8 +2025,8 @@ function Start-AnalyzeLogs {
     if ($logsWithTimes.Count -eq 2) {
         # Determine display names based on comparison type
         if ($uniqueTypes -gt 1) {
-            $displayNameA = "$($logA.Type) [$($logA.Firmware)]"
-            $displayNameB = "$($logB.Type) [$($logB.Firmware)]"
+            $displayNameA = "$($logA.Type) [$($logA.FirmwareBranch)]"
+            $displayNameB = "$($logB.Type) [$($logB.FirmwareBranch)]"
             $sectionTitle = "Optimization Impact"
 
             # Find pages where OPTIMIZED improved the most
@@ -2070,8 +2070,8 @@ function Start-AnalyzeLogs {
             }
         } else {
             # Same book type: Device comparison
-            $displayNameA = "$($logA.Port) [$($logA.Firmware)]"
-            $displayNameB = "$($logB.Port) [$($logB.Firmware)]"
+            $displayNameA = "$($logA.Port) [$($logA.FirmwareBranch)]"
+            $displayNameB = "$($logB.Port) [$($logB.FirmwareBranch)]"
             $sectionTitle = "Performance Highlights"
 
             # Traditional best/worst based on pure difference
