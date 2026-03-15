@@ -17,6 +17,238 @@ if (-not (Test-Path $logsDir)) {
 $global:CaptureSuccess = $false
 
 # ============================================================
+# FIRMWARE CACHE SYSTEM
+# ============================================================
+
+# Directory for firmware cache
+$firmwareCacheDir = Join-Path $PSScriptRoot "firmware_cache"
+if (-not (Test-Path $firmwareCacheDir)) {
+    New-Item -ItemType Directory -Path $firmwareCacheDir | Out-Null
+}
+
+function Get-FirmwareCacheFilePath {
+    param([string]$ComPort)
+    return Join-Path $firmwareCacheDir "firmware_${ComPort}.json"
+}
+
+function Get-CachedFirmware {
+    param(
+        [string]$ComPort,
+        [System.IO.Ports.SerialPort]$Port
+    )
+
+    $cacheFile = Get-FirmwareCacheFilePath -ComPort $ComPort
+
+    # Check if cache exists (no validation of port state - cache persists)
+    if (Test-Path $cacheFile) {
+        try {
+            $cacheData = Get-Content $cacheFile -Raw | ConvertFrom-Json
+
+            # Check if cache is recent (within 1 hour)
+            $cacheTime = [DateTime]::Parse($cacheData.Timestamp)
+            if ((Get-Date) - $cacheTime -lt [TimeSpan]::FromHours(1)) {
+                return @{
+                    Firmware = $cacheData.firmware
+                    Branch = $cacheData.branch
+                    FromCache = $true
+                }
+            } else {
+                # Cache is old, remove it
+                Remove-Item $cacheFile -Force
+            }
+        } catch {
+            # Invalid cache file, remove it
+            if (Test-Path $cacheFile) {
+                Remove-Item $cacheFile -Force
+            }
+        }
+    }
+
+    return $null
+}
+
+function Save-FirmwareCache {
+    param(
+        [string]$ComPort,
+        [string]$Firmware,
+        [string]$Branch
+    )
+
+    $cacheFile = Get-FirmwareCacheFilePath -ComPort $ComPort
+    $cacheData = @{
+        ComPort = $ComPort
+        Firmware = $Firmware
+        Branch = $Branch
+        Timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    }
+
+    $cacheData | ConvertTo-Json | Set-Content $cacheFile -Encoding UTF8
+    # Silent save - no output needed as it's transparent
+}
+
+function Get-FirmwareFromExistingLogs {
+    param(
+        [string]$ComPort,
+        [int]$MaxFileAgeMinutes = 60
+    )
+
+    $logFiles = Get-ChildItem -Path $logsDir -Filter "*${ComPort}*.txt" -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -gt (Get-Date).AddMinutes(-$MaxFileAgeMinutes) } |
+        Sort-Object LastWriteTime -Descending
+
+    if ($logFiles.Count -eq 0) {
+        return $null
+    }
+
+    # Check the most recent log file
+    $latestLog = $logFiles[0]
+    try {
+        $firstLine = Get-Content $latestLog.FullName -First 1 -ErrorAction SilentlyContinue
+        if ($firstLine -match 'CAPTURE_METADATA:.*Firmware\+Branch=([^\s]+)') {
+            $firmwareInfo = $matches[1] -split '\+'
+            $firmwareVersion = $firmwareInfo[0]
+            $firmwareBranch = if ($firmwareInfo.Count -gt 1) { $firmwareInfo[1] } else { "master" }
+
+            # Ignore logs with Unknown firmware - treat as if not found
+            if ($firmwareVersion -eq "Unknown" -or $firmwareVersion -eq "unknown") {
+                return $null
+            }
+
+            return @{
+                Firmware = $firmwareVersion
+                Branch = $firmwareBranch
+                Source = "Log: $($latestLog.Name)"
+                Detected = $true
+            }
+        }
+    }
+    catch {
+        # Error reading log file
+    }
+
+    return $null
+}
+
+function Get-TempFirmwareDetection {
+    param(
+        [System.IO.Ports.SerialPort]$Port,
+        [string]$ComPort,
+        [int]$TimeoutSeconds = 8
+    )
+
+    $startTime = Get-Date
+    $firmwareVersion = "Unknown"
+    $firmwareBranch = "Unknown"
+    $detected = $false
+    $allData = New-Object System.Text.StringBuilder
+
+    # Read any existing data first (might have firmware info)
+    if ($Port.BytesToRead -gt 0) {
+        $existingData = $Port.ReadExisting()
+        $allData.Append($existingData) | Out-Null
+    }
+
+    while (-not $detected -and ($startTime).AddSeconds($TimeoutSeconds) -gt (Get-Date)) {
+        Start-Sleep -Milliseconds 200
+
+        if ($Port.BytesToRead -gt 0) {
+            $data = $Port.ReadExisting()
+            $allData.Append($data) | Out-Null
+
+            # Check all accumulated data for firmware info
+            $lines = $allData.ToString() -split "`r?`n"
+
+            foreach ($line in $lines) {
+                if ($line -match "\[DBG\]\s+\[MAIN\]\s+Starting\s+CrossPoint\s+version\s+([\d\.]+(?:-[a-z]+)?)(?:\+([^ \t]+))?") {
+                    $firmwareVersion = $matches[1]
+                    if ($matches[2]) {
+                        $firmwareBranch = $matches[2]
+                    } else {
+                        $firmwareBranch = "master"
+                    }
+                    $detected = $true
+                    break
+                }
+            }
+        }
+    }
+
+    return @{
+        Firmware = $firmwareVersion
+        Branch = $firmwareBranch
+        Detected = $detected
+    }
+}
+
+function Detect-FirmwareFromDevice {
+    param(
+        [System.IO.Ports.SerialPort]$Port,
+        [string]$ComPort,
+        [int]$TimeoutSeconds = 10
+    )
+
+    $startTime = Get-Date
+    $firmwareVersion = "Unknown"
+    $firmwareBranch = "Unknown"
+    $detected = $false
+
+    Write-Host "Detecting firmware for $ComPort..." -ForegroundColor Cyan
+
+    while (-not $detected -and ($startTime).AddSeconds($TimeoutSeconds) -gt (Get-Date)) {
+        Start-Sleep -Milliseconds 100
+
+        if ($Port.BytesToRead -gt 0) {
+            $data = $Port.ReadExisting()
+            $lines = $data -split "`r?`n"
+
+            foreach ($line in $lines) {
+                if ($line -match "\[DBG\]\s+\[MAIN\]\s+Starting\s+CrossPoint\s+version\s+([\d\.]+(?:-[a-z]+)?)(?:\+([^ \t]+))?") {
+                    $firmwareVersion = $matches[1]
+                    if ($matches[2]) {
+                        $firmwareBranch = $matches[2]
+                    } else {
+                        $firmwareBranch = "master"
+                    }
+                    $detected = $true
+                    Write-Host "Detected firmware for $ComPort : $firmwareVersion+$firmwareBranch" -ForegroundColor Cyan
+                    break
+                }
+            }
+        }
+    }
+
+    if (-not $detected) {
+        Write-Host "Firmware detection timeout for $ComPort - using 'Unknown'" -ForegroundColor Yellow
+    }
+
+    # Save to cache regardless of detection result
+    Save-FirmwareCache -ComPort $ComPort -Firmware $firmwareVersion -Branch $firmwareBranch
+
+    return @{
+        Firmware = $firmwareVersion
+        Branch = $firmwareBranch
+        FromCache = $false
+    }
+}
+
+function Get-FirmwareForDevice {
+    param(
+        [System.IO.Ports.SerialPort]$Port,
+        [string]$ComPort
+    )
+
+    # Try to get from cache first (definitive association from previous session)
+    $cached = Get-CachedFirmware -ComPort $ComPort -Port $Port
+    if ($cached) {
+        return $cached
+    }
+
+    # Not in cache, detect from device (for single device mode or skip-reset mode)
+    Write-Host "No definitive association found for $ComPort - detecting firmware..." -ForegroundColor Yellow
+    return Detect-FirmwareFromDevice -Port $Port -ComPort $ComPort
+}
+
+# ============================================================
 # MENU FUNCTIONS
 # ============================================================
 
@@ -177,27 +409,30 @@ function Start-SingleDeviceCapture {
         $port.Open()
         Write-Host " [OK]" -ForegroundColor Green
 
+        # Get firmware from cache or detect from device
+        Write-Host "Getting firmware info..." -ForegroundColor Cyan
+        $firmwareInfo = Get-FirmwareForDevice -Port $port -ComPort $ComPort
+        $firmwareVersion = $firmwareInfo.Firmware
+        $firmwareBranch = $firmwareInfo.Branch
+
         Write-Host "Creating writer..." -ForegroundColor Cyan
         $writer = New-Object System.IO.StreamWriter($fileName, $false, [System.Text.Encoding]::UTF8)
         $writer.AutoFlush = $true
 
+        # Write metadata header immediately with firmware info
+        $firmwareCombined = "${firmwareVersion}+${firmwareBranch}"
+        $metadata = "CAPTURE_METADATA: Type=${sanitizedBook}, Device=$ComPort, Timestamp=${timestamp}, Firmware+Branch=${firmwareCombined}"
+        $writer.WriteLine($metadata)
+        $writer.Flush()
+
         Write-Host "[OK] Capturing... Press ESC or Q to stop" -ForegroundColor Green
         Write-Host ""
-
-        # Firmware detection variables
-        $initialBuffer = New-Object System.Text.StringBuilder
-        $firmwareVersion = "Unknown"
-        $firmwareBranch = "Unknown"
-        $firmwareDetected = $false
-        $maxFirmwareWait = 10  # Wait up to 10 seconds for firmware info
-        $firmwareSearchStartTime = Get-Date
 
         $count = 0
         $pagesDetected = 0
         $coverStatus = $null
         $lastDot = Get-Date
         $stopRequested = $false
-        $metadataWritten = $false
 
         while (-not $stopRequested) {
             # Check for key press to stop capture
@@ -211,51 +446,8 @@ function Start-SingleDeviceCapture {
 
             if ($port.BytesToRead -gt 0) {
                 $data = $port.ReadExisting()
-
-                # Buffer initial data for firmware detection (before writing to file)
-                if (-not $metadataWritten) {
-                    $initialBuffer.Append($data) | Out-Null
-
-                    # Try to detect firmware version in incoming data
-                    if (-not $firmwareDetected) {
-                        $newLines = $data -split "`r?`n"
-                        foreach ($line in $newLines) {
-                            if ($line -match "\[DBG\]\s+\[MAIN\]\s+Starting\s+CrossPoint\s+version\s+([\d\.]+(?:-[a-z]+)?)(?:\+([^ \t]+))?") {
-                                $firmwareVersion = $matches[1]
-                                if ($matches[2]) {
-                                    $firmwareBranch = $matches[2]
-                                } else {
-                                    $firmwareBranch = "master"
-                                }
-                                $firmwareDetected = $true
-                                Write-Host ""
-                                Write-Host "Detected Firmware: $firmwareVersion (branch: $firmwareBranch)" -ForegroundColor Cyan
-                                break
-                            }
-                        }
-                    }
-
-                    # Check if we should write metadata now (firmware detected or timeout)
-                    $timeSinceStart = (Get-Date) - $firmwareSearchStartTime
-                    if ($firmwareDetected -or $timeSinceStart.TotalSeconds -gt $maxFirmwareWait) {
-                        # Write metadata header with combined firmware+branch info
-                        $firmwareCombined = "${firmwareVersion}+${firmwareBranch}"
-                        $metadata = "CAPTURE_METADATA: Type=${sanitizedBook}, Device=$ComPort, Timestamp=${timestamp}, Firmware+Branch=${firmwareCombined}"
-                        $writer.WriteLine($metadata)
-
-                        # Write buffered data
-                        $writer.Write($initialBuffer.ToString())
-                        $metadataWritten = $true
-
-                        if (-not $firmwareDetected) {
-                            Write-Host ""
-                            Write-Host "Firmware detection timeout - using 'Unknown'" -ForegroundColor Yellow
-                        }
-                    }
-                } else {
-                    # Normal mode: write directly to file
-                    $writer.Write($data)
-                }
+                # Write directly to file (metadata already written)
+                $writer.Write($data)
 
                 $count += $data.Length
 
@@ -365,26 +557,20 @@ function Start-DualDeviceCapture {
 
     Clear-Host
     Write-Host ""
-    Write-Host ""
     Write-Host "========================================" -ForegroundColor Cyan
-    Write-Host "  DUAL DEVICE CAPTURE - Device ID" -ForegroundColor Cyan
+    Write-Host "  DUAL DEVICE CAPTURE" -ForegroundColor Cyan
     Write-Host "========================================" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "This will help you identify which COM port corresponds" -ForegroundColor Yellow
-    Write-Host "to each physical device (LEFT vs RIGHT)." -ForegroundColor Yellow
     Write-Host ""
     if ($DebugMode) {
-        Write-Host "DEBUG MODE: Will show all received data for analysis" -ForegroundColor Magenta
+        Write-Host "  [DEBUG] Showing all received data" -ForegroundColor Magenta
+        Write-Host ""
     }
     if ($SkipReset) {
-        Write-Host "SKIP RESET: Devices will NOT be reset (already powered on)" -ForegroundColor Magenta
+        Write-Host "  [SKIP RESET] Devices will not be reset" -ForegroundColor Magenta
+        Write-Host ""
     }
-    Write-Host ""
-    Write-Host "Please connect both devices to different COM ports." -ForegroundColor Yellow
-    Write-Host ""
 
     # Get available COM ports
-    Write-Host "Detecting available COM ports..." -ForegroundColor Cyan
     $rawPorts = [System.IO.Ports.SerialPort]::GetPortNames()
 
     # Ensure we always have an array, never $null
@@ -393,10 +579,8 @@ function Start-DualDeviceCapture {
         $availablePorts = @()
     }
 
-
     if ($availablePorts.Count -lt 2) {
-        Write-Host "ERROR: Less than 2 COM ports detected" -ForegroundColor Red
-        Write-Host "Available ports: $($availablePorts -join ', ')" -ForegroundColor Yellow
+        Write-Host "  ERROR: Less than 2 COM ports detected ($($availablePorts -join ', '))" -ForegroundColor Red
         Write-Host ""
         Write-Host "Press ENTER to return to menu..." -ForegroundColor Gray
         Read-Host
@@ -406,26 +590,71 @@ function Start-DualDeviceCapture {
         return
     }
 
-    Write-Host "Found $($availablePorts.Count) COM port(s)" -ForegroundColor Green
-    Write-Host ""
-
-    # Display ports with numbers
-    Write-Host "Available COM ports:" -ForegroundColor Cyan
-    for ($i = 0; $i -lt $availablePorts.Count; $i++) {
-        Write-Host "  [$($i+1)] $($availablePorts[$i])" -ForegroundColor White
-    }
-    Write-Host ""
-
-    # Automatic device detection
-    Write-Host "========================================" -ForegroundColor Cyan
-    Write-Host "  AUTOMATIC DEVICE DETECTION" -ForegroundColor Cyan
-    Write-Host "========================================" -ForegroundColor Cyan
-    Write-Host ""
-
     try {
-        # Reset devices if not skipped
+        # STEP 1: Read firmware from existing logs (silent, automatic)
+        $tempFirmwareMap = @{}
+        $needsDetection = @()
+
+        foreach ($portName in $availablePorts) {
+            $firmwareFromLog = Get-FirmwareFromExistingLogs -ComPort $portName -MaxFileAgeMinutes 60
+
+            if ($firmwareFromLog -and $firmwareFromLog.Detected) {
+                $tempFirmwareMap[$portName] = $firmwareFromLog
+            } else {
+                $needsDetection += $portName
+            }
+        }
+
+        # STEP 2: Detect firmware from running devices (automatic, no prompt)
+        if ($needsDetection.Count -gt 0) {
+            foreach ($portName in $needsDetection) {
+                try {
+                    $detectPort = New-Object System.IO.Ports.SerialPort($portName, 115200, "None", 8, "One")
+                    $detectPort.Open()
+
+                    # Give device time to respond and send any pending data
+                    Start-Sleep -Milliseconds 1000
+
+                    # Try to detect firmware from running device
+                    $firmwareFromDevice = Get-TempFirmwareDetection -Port $detectPort -ComPort $portName -TimeoutSeconds 8
+                    $tempFirmwareMap[$portName] = $firmwareFromDevice
+
+                    if (-not $firmwareFromDevice.Detected) {
+                        $tempFirmwareMap[$portName] = @{
+                            Firmware = "Unknown"
+                            Branch = "Unknown"
+                            Detected = $false
+                        }
+                    }
+
+                    $detectPort.Close()
+                }
+                catch {
+                    $tempFirmwareMap[$portName] = @{
+                        Firmware = "Unknown"
+                        Branch = "Unknown"
+                        Detected = $false
+                    }
+                }
+            }
+        }
+
+        # Display all ports with firmware (single consolidated view)
+        foreach ($portName in $availablePorts) {
+            if ($tempFirmwareMap.ContainsKey($portName) -and $tempFirmwareMap[$portName].Detected) {
+                $fw = $tempFirmwareMap[$portName]
+                Write-Host "  $portName  " -ForegroundColor Gray -NoNewline
+                Write-Host "$($fw.Firmware)+$($fw.Branch)" -ForegroundColor White
+            } else {
+                Write-Host "  $portName  " -ForegroundColor Gray -NoNewline
+                Write-Host "(firmware unknown)" -ForegroundColor Yellow
+            }
+        }
+        Write-Host ""
+
+        # STEP 3: Reset devices if not skipped (AFTER firmware detection)
         if (-not $SkipReset) {
-            Write-Host "Resetting all connected devices..." -ForegroundColor Cyan
+            Write-Host "Resetting devices..." -ForegroundColor DarkGray -NoNewline
             foreach ($portName in $availablePorts) {
                 try {
                     $tempPort = New-Object System.IO.Ports.SerialPort($portName, 115200, "None", 8, "One")
@@ -435,32 +664,27 @@ function Start-DualDeviceCapture {
                     $tempPort.DtrEnable = $false
                     Start-Sleep -Milliseconds 500
                     $tempPort.Close()
-                    Write-Host "  Reset sent to $portName" -ForegroundColor Gray
                 }
                 catch {
+                    Write-Host ""
                     Write-Host "  WARNING: Could not reset $portName" -ForegroundColor Yellow
                 }
             }
-
-            Write-Host ""
-            Write-Host "Waiting for devices to restart..." -ForegroundColor Yellow
+            Write-Host " waiting for restart..." -ForegroundColor DarkGray
             Start-Sleep -Seconds 3
+            Write-Host ""
         }
 
-        # Open all ports to monitor
+        # STEP 4: Open all ports to monitor for button presses
         $testPorts = @()
         $portMap = @{}
 
-        Write-Host "Opening all COM ports to monitor for button presses..." -ForegroundColor Cyan
         foreach ($portName in $availablePorts) {
             try {
                 $testPort = New-Object System.IO.Ports.SerialPort($portName, 115200, "None", 8, "One")
                 $testPort.Open()
                 $testPorts += $testPort
                 $portMap[$portName] = $testPort
-                Write-Host "  Opened $portName" -ForegroundColor Gray
-                Start-Sleep -Milliseconds 500
-                $testPort.ReadExisting() | Out-Null
             }
             catch {
                 Write-Host "  WARNING: Could not open $portName" -ForegroundColor Yellow
@@ -479,12 +703,7 @@ function Start-DualDeviceCapture {
         }
 
         # Detect LEFT device
-        Write-Host ""
-        Write-Host "STEP 1: Identify LEFT device" -ForegroundColor Cyan
-        Write-Host "==============================" -ForegroundColor Cyan
-        Write-Host ""
-        Write-Host "HOLD a button on the LEFT device for 2+ seconds..." -ForegroundColor Yellow
-        Write-Host ""
+        Write-Host "[ LEFT  ]  Hold a button for 2+ seconds..." -ForegroundColor Yellow
 
         $leftPort = $null
         $maxWaitTime = 60
@@ -518,7 +737,16 @@ function Start-DualDeviceCapture {
 
                         if ($portDataCount[$testPort.PortName] -ge $consecutiveThreshold) {
                             $leftPort = $testPort.PortName
-                            Write-Host "LEFT device detected on: $leftPort" -ForegroundColor Green
+                            Write-Host "           LEFT  ->  $leftPort" -ForegroundColor Green
+
+                            # Save DEFINITIVE association (COM → firmware) to cache (only if valid)
+                            if ($tempFirmwareMap.ContainsKey($leftPort)) {
+                                $leftFirmware = $tempFirmwareMap[$leftPort]
+                                if ($leftFirmware.Firmware -ne "Unknown" -and $leftFirmware.Firmware -ne "unknown") {
+                                    Save-FirmwareCache -ComPort $leftPort -Firmware $leftFirmware.Firmware -Branch $leftFirmware.Branch
+                                }
+                            }
+
                             break
                         }
                     }
@@ -539,12 +767,7 @@ function Start-DualDeviceCapture {
         }
 
         # Detect RIGHT device
-        Write-Host ""
-        Write-Host "STEP 2: Identify RIGHT device" -ForegroundColor Cyan
-        Write-Host "===============================" -ForegroundColor Cyan
-        Write-Host ""
-        Write-Host "HOLD a button on the RIGHT device for 2+ seconds..." -ForegroundColor Yellow
-        Write-Host ""
+        Write-Host "[ RIGHT ]  Hold a button for 2+ seconds..." -ForegroundColor Yellow
 
         $rightPort = $null
         $startTime = Get-Date
@@ -576,7 +799,16 @@ function Start-DualDeviceCapture {
 
                         if ($portDataCount[$testPort.PortName] -ge $consecutiveThreshold) {
                             $rightPort = $testPort.PortName
-                            Write-Host "RIGHT device detected on: $rightPort" -ForegroundColor Green
+                            Write-Host "           RIGHT ->  $rightPort" -ForegroundColor Green
+
+                            # Save DEFINITIVE association (COM → firmware) to cache (only if valid)
+                            if ($tempFirmwareMap.ContainsKey($rightPort)) {
+                                $rightFirmware = $tempFirmwareMap[$rightPort]
+                                if ($rightFirmware.Firmware -ne "Unknown" -and $rightFirmware.Firmware -ne "unknown") {
+                                    Save-FirmwareCache -ComPort $rightPort -Firmware $rightFirmware.Firmware -Branch $rightFirmware.Branch
+                                }
+                            }
+
                             break
                         }
                     }
@@ -599,56 +831,30 @@ function Start-DualDeviceCapture {
         }
 
         Write-Host ""
-        Write-Host "Configuration identified:" -ForegroundColor Cyan
-        Write-Host "  LEFT device  : $leftPort" -ForegroundColor Green
-        Write-Host "  RIGHT device : $rightPort" -ForegroundColor Green
-        Write-Host ""
-        Write-Host "If this is correct, press ENTER to continue..." -ForegroundColor Yellow
-        Read-Host
 
         # Book selection
-        Write-Host ""
-        Write-Host "========================================" -ForegroundColor Cyan
-        Write-Host "  BOOK SELECTION" -ForegroundColor Cyan
-        Write-Host "========================================" -ForegroundColor Cyan
-        Write-Host ""
-        Write-Host "LEFT Device ($leftPort):" -ForegroundColor Green
-        Write-Host "  What book will be opened on the LEFT device?" -ForegroundColor Yellow
-        Write-Host "  Options:" -ForegroundColor Cyan
-        Write-Host "    1. ORIGINAL" -ForegroundColor White
-        Write-Host "    2. OPTIMIZED" -ForegroundColor White
-        Write-Host "    3. Custom name" -ForegroundColor White
-
-        $choiceA = Read-Host "  Select (1-3)"
-
+        Write-Host "  LEFT  ($leftPort)  [1=ORIGINAL  2=OPTIMIZED  3=Custom]: " -ForegroundColor White -NoNewline
+        $choiceA = Read-Host
         switch ($choiceA) {
             "1" { $bookA = "ORIGINAL" }
             "2" { $bookA = "OPTIMIZED" }
-            "3" { $bookA = Read-Host "    Enter book name for LEFT device" }
+            "3" { $bookA = Read-Host "  Custom name for LEFT" }
             default { $bookA = "UNKNOWN" }
         }
 
-        Write-Host ""
-        Write-Host "RIGHT Device ($rightPort):" -ForegroundColor Green
-        Write-Host "  What book will be opened on the RIGHT device?" -ForegroundColor Yellow
-        Write-Host "  Options:" -ForegroundColor Cyan
-        Write-Host "    1. ORIGINAL" -ForegroundColor White
-        Write-Host "    2. OPTIMIZED" -ForegroundColor White
-        Write-Host "    3. Custom name" -ForegroundColor White
-
-        $choiceB = Read-Host "  Select (1-3)"
-
+        Write-Host "  RIGHT ($rightPort)  [1=ORIGINAL  2=OPTIMIZED  3=Custom]: " -ForegroundColor White -NoNewline
+        $choiceB = Read-Host
         switch ($choiceB) {
             "1" { $bookB = "ORIGINAL" }
             "2" { $bookB = "OPTIMIZED" }
-            "3" { $bookB = Read-Host "    Enter book name for RIGHT device" }
+            "3" { $bookB = Read-Host "  Custom name for RIGHT" }
             default { $bookB = "UNKNOWN" }
         }
 
         Write-Host ""
-        Write-Host "Configuration:" -ForegroundColor Cyan
-        Write-Host "  LEFT Device  ($leftPort): $bookA" -ForegroundColor Green
-        Write-Host "  RIGHT Device ($rightPort): $bookB" -ForegroundColor Green
+        Write-Host ""
+        Write-Host "  LEFT  ($leftPort)  $bookA" -ForegroundColor Green
+        Write-Host "  RIGHT ($rightPort)  $bookB" -ForegroundColor Green
         Write-Host ""
 
         # Start capture
@@ -674,7 +880,7 @@ function Start-DualDeviceCapture {
         Write-Host ""
         Write-Host ""
         Write-Host "========================================" -ForegroundColor Cyan
-        Write-Host "  CAPTURE IN PROGRESS" -ForegroundColor Cyan
+        Write-Host "  CAPTURING" -ForegroundColor Cyan
         Write-Host "========================================" -ForegroundColor Cyan
         Write-Host ""
         Write-Host "Opening ports..." -ForegroundColor Cyan
@@ -684,34 +890,47 @@ function Start-DualDeviceCapture {
             $portA = New-Object System.IO.Ports.SerialPort($leftPort, 115200, "None", 8, "One")
             $portB = New-Object System.IO.Ports.SerialPort($rightPort, 115200, "None", 8, "One")
 
-            Write-Host "Opening $leftPort..." -NoNewline
             $portA.Open()
-            Write-Host " [OK]" -ForegroundColor Green
-
-            Write-Host "Opening $rightPort..." -NoNewline
             $portB.Open()
-            Write-Host " [OK]" -ForegroundColor Green
+            Write-Host "  Ports opened" -ForegroundColor Green
 
-            Write-Host "Creating writers..." -ForegroundColor Cyan
+            # Get firmware info from temp detection map (already detected before reset)
+            if ($tempFirmwareMap.ContainsKey($leftPort)) {
+                $fwA = $tempFirmwareMap[$leftPort]
+                $firmwareVersionA = $fwA.Firmware
+                $firmwareBranchA = $fwA.Branch
+            } else {
+                $firmwareVersionA = "Unknown"
+                $firmwareBranchA = "Unknown"
+            }
+
+            if ($tempFirmwareMap.ContainsKey($rightPort)) {
+                $fwB = $tempFirmwareMap[$rightPort]
+                $firmwareVersionB = $fwB.Firmware
+                $firmwareBranchB = $fwB.Branch
+            } else {
+                $firmwareVersionB = "Unknown"
+                $firmwareBranchB = "Unknown"
+            }
+
+            # Create writers and write metadata
             $writerA = New-Object System.IO.StreamWriter($fileA, $false, [System.Text.Encoding]::UTF8)
             $writerB = New-Object System.IO.StreamWriter($fileB, $false, [System.Text.Encoding]::UTF8)
             $writerA.AutoFlush = $true
             $writerB.AutoFlush = $true
 
-            Write-Host "[OK] Capturing... Press ESC or Q to stop" -ForegroundColor Green
-            Write-Host ""
+            # Write metadata headers
+            $firmwareCombinedA = "${firmwareVersionA}+${firmwareBranchA}"
+            $metadataA = "CAPTURE_METADATA: Type=${sanitizedBookA}, Device=$leftPort, Timestamp=${timestamp}, Firmware+Branch=${firmwareCombinedA}"
+            $writerA.WriteLine($metadataA)
 
-            # Firmware detection variables for dual capture
-            $initialBufferA = New-Object System.Text.StringBuilder
-            $initialBufferB = New-Object System.Text.StringBuilder
-            $firmwareVersionA = "Unknown"
-            $firmwareBranchA = "Unknown"
-            $firmwareVersionB = "Unknown"
-            $firmwareBranchB = "Unknown"
-            $firmwareDetectedA = $false
-            $firmwareDetectedB = $false
-            $maxFirmwareWait = 10
-            $firmwareSearchStartTime = Get-Date
+            $firmwareCombinedB = "${firmwareVersionB}+${firmwareBranchB}"
+            $metadataB = "CAPTURE_METADATA: Type=${sanitizedBookB}, Device=$rightPort, Timestamp=${timestamp}, Firmware+Branch=${firmwareCombinedB}"
+            $writerB.WriteLine($metadataB)
+
+            Write-Host ""
+            Write-Host "[Capturing... Press ESC or Q to stop]" -ForegroundColor Green
+            Write-Host ""
 
             $countA = 0
             $countB = 0
@@ -721,8 +940,6 @@ function Start-DualDeviceCapture {
             $coverStatusB = $null
             $lastDot = Get-Date
             $stopRequested = $false
-            $metadataWrittenA = $false
-            $metadataWrittenB = $false
 
             while (-not $stopRequested) {
                 # Check for key press to stop capture
@@ -736,51 +953,8 @@ function Start-DualDeviceCapture {
 
                 if ($portA.BytesToRead -gt 0) {
                     $data = $portA.ReadExisting()
-
-                    # Buffer initial data for firmware detection (before writing to file)
-                    if (-not $metadataWrittenA) {
-                        $initialBufferA.Append($data) | Out-Null
-
-                        # Try to detect firmware version in incoming data
-                        if (-not $firmwareDetectedA) {
-                            $newLines = $data -split "`r?`n"
-                            foreach ($line in $newLines) {
-                                if ($line -match "\[DBG\]\s+\[MAIN\]\s+Starting\s+CrossPoint\s+version\s+([\d\.]+(?:-[a-z]+)?)(?:\+([^ \t]+))?") {
-                                    $firmwareVersionA = $matches[1]
-                                    if ($matches[2]) {
-                                        $firmwareBranchA = $matches[2]
-                                    } else {
-                                        $firmwareBranchA = "master"
-                                    }
-                                    $firmwareDetectedA = $true
-                                    Write-Host ""
-                                    Write-Host "LEFT Device Detected Firmware: $firmwareVersionA (branch: $firmwareBranchA)" -ForegroundColor Cyan
-                                    break
-                                }
-                            }
-                        }
-
-                        # Check if we should write metadata now (firmware detected or timeout)
-                        $timeSinceStart = (Get-Date) - $firmwareSearchStartTime
-                        if ($firmwareDetectedA -or $timeSinceStart.TotalSeconds -gt $maxFirmwareWait) {
-                            # Write metadata header with combined firmware+branch info
-                            $firmwareCombinedA = "${firmwareVersionA}+${firmwareBranchA}"
-                            $metadataA = "CAPTURE_METADATA: Type=${sanitizedBookA}, Device=$leftPort, Timestamp=${timestamp}, Firmware+Branch=${firmwareCombinedA}"
-                            $writerA.WriteLine($metadataA)
-
-                            # Write buffered data
-                            $writerA.Write($initialBufferA.ToString())
-                            $metadataWrittenA = $true
-
-                            if (-not $firmwareDetectedA) {
-                                Write-Host ""
-                                Write-Host "LEFT Device Firmware detection timeout - using 'Unknown'" -ForegroundColor Yellow
-                            }
-                        }
-                    } else {
-                        # Normal mode: write directly to file
-                        $writerA.Write($data)
-                    }
+                    # Write directly to file (metadata already written)
+                    $writerA.Write($data)
 
                     $countA += $data.Length
 
@@ -801,51 +975,8 @@ function Start-DualDeviceCapture {
 
                 if ($portB.BytesToRead -gt 0) {
                     $data = $portB.ReadExisting()
-
-                    # Buffer initial data for firmware detection (before writing to file)
-                    if (-not $metadataWrittenB) {
-                        $initialBufferB.Append($data) | Out-Null
-
-                        # Try to detect firmware version in incoming data
-                        if (-not $firmwareDetectedB) {
-                            $newLines = $data -split "`r?`n"
-                            foreach ($line in $newLines) {
-                                if ($line -match "\[DBG\]\s+\[MAIN\]\s+Starting\s+CrossPoint\s+version\s+([\d\.]+(?:-[a-z]+)?)(?:\+([^ \t]+))?") {
-                                    $firmwareVersionB = $matches[1]
-                                    if ($matches[2]) {
-                                        $firmwareBranchB = $matches[2]
-                                    } else {
-                                        $firmwareBranchB = "master"
-                                    }
-                                    $firmwareDetectedB = $true
-                                    Write-Host ""
-                                    Write-Host "RIGHT Device Detected Firmware: $firmwareVersionB (branch: $firmwareBranchB)" -ForegroundColor Cyan
-                                    break
-                                }
-                            }
-                        }
-
-                        # Check if we should write metadata now (firmware detected or timeout)
-                        $timeSinceStart = (Get-Date) - $firmwareSearchStartTime
-                        if ($firmwareDetectedB -or $timeSinceStart.TotalSeconds -gt $maxFirmwareWait) {
-                            # Write metadata header with combined firmware+branch info
-                            $firmwareCombinedB = "${firmwareVersionB}+${firmwareBranchB}"
-                            $metadataB = "CAPTURE_METADATA: Type=${sanitizedBookB}, Device=$rightPort, Timestamp=${timestamp}, Firmware+Branch=${firmwareCombinedB}"
-                            $writerB.WriteLine($metadataB)
-
-                            # Write buffered data
-                            $writerB.Write($initialBufferB.ToString())
-                            $metadataWrittenB = $true
-
-                            if (-not $firmwareDetectedB) {
-                                Write-Host ""
-                                Write-Host "RIGHT Device Firmware detection timeout - using 'Unknown'" -ForegroundColor Yellow
-                            }
-                        }
-                    } else {
-                        # Normal mode: write directly to file
-                        $writerB.Write($data)
-                    }
+                    # Write directly to file (metadata already written)
+                    $writerB.Write($data)
 
                     $countB += $data.Length
 
