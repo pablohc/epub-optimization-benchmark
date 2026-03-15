@@ -1825,6 +1825,11 @@ function Start-AnalyzeLogs {
 
             $hasImageDiscrepancy = $imagesA -ne $imagesB
 
+            # Mark page label with [!] whenever there is any image discrepancy
+            if ($hasImageDiscrepancy -and $row.Page -notlike "*Cover*") {
+                $row.Page = "$($row.Page) [!]"
+            }
+
             # Check for cover generation status mismatch (unfair comparison)
             $hasCoverMismatch = $false
             if ($row.Page -like "*Cover*") {
@@ -1943,19 +1948,25 @@ function Start-AnalyzeLogs {
             $colWidths[$prop] = $maxLen
         }
 
+        $rightAlignedCols = @($colA, $colB, $imgColA, $imgColB, "Diff_ms", "Percent")
+
         # Print header row
         foreach ($prop in $orderedProperties) {
             $color = if ($prop -eq $colA -or $prop -eq $imgColA) { "Green" }
                      elseif ($prop -eq $colB -or $prop -eq $imgColB) { "Blue" }
                      else { "White" }
-            Write-Host ("{0,-$($colWidths[$prop])}" -f $prop) -ForegroundColor $color -NoNewline
+            $w = $colWidths[$prop]
+            $fmt = if ($rightAlignedCols -contains $prop) { "{0,$w}" } else { "{0,-$w}" }
+            Write-Host ($fmt -f $prop) -ForegroundColor $color -NoNewline
             Write-Host "  " -NoNewline
         }
         Write-Host ""
 
         # Print separator
         foreach ($prop in $orderedProperties) {
-            Write-Host ("{0,-$($colWidths[$prop])}" -f ("-" * $colWidths[$prop])) -NoNewline
+            $w = $colWidths[$prop]
+            $fmt = if ($rightAlignedCols -contains $prop) { "{0,$w}" } else { "{0,-$w}" }
+            Write-Host ($fmt -f ("-" * $w)) -NoNewline
             Write-Host "  " -NoNewline
         }
         Write-Host ""
@@ -1966,6 +1977,7 @@ function Start-AnalyzeLogs {
                 $pv = $row.PSObject.Properties[$prop]
                 $strVal = if ($null -ne $pv -and $null -ne $pv.Value) { $pv.Value.ToString() } else { "" }
                 $width = $colWidths[$prop]
+                $fmt = if ($rightAlignedCols -contains $prop) { "{0,$width}" } else { "{0,-$width}" }
 
                 if ($prop -eq $colA -or $prop -eq $imgColA) {
                     $color = "Green"
@@ -1982,9 +1994,9 @@ function Start-AnalyzeLogs {
                 }
 
                 if ($strVal -like "*[!]*") {
-                    Write-WithWarning ("{0,-$width}" -f $strVal) $color -NoNewline
+                    Write-WithWarning ($fmt -f $strVal) $color -NoNewline
                 } else {
-                    Write-Host ("{0,-$width}" -f $strVal) -ForegroundColor $color -NoNewline
+                    Write-Host ($fmt -f $strVal) -ForegroundColor $color -NoNewline
                 }
                 Write-Host "  " -NoNewline
             }
@@ -2016,24 +2028,6 @@ function Start-AnalyzeLogs {
         # Image discrepancy warning
         $pagesWithWarnings = $comparison | Where-Object { $_.Winner -like "*[!]*" }
 
-        if ($pagesWithWarnings) {
-            Write-WithWarning "[!] UNFAIR COMPARISONS DETECTED:" "Red"
-
-            foreach ($page in $pagesWithWarnings) {
-                if ($page.Page -like "*Cover*") {
-                    $coverSuccessA = $page."${colA}_CoverSuccess"
-                    $coverSuccessB = $page."${colB}_CoverSuccess"
-                    $statusA = if ($coverSuccessA) { "SUCCESS" } else { "FAILED" }
-                    $statusB = if ($coverSuccessB) { "SUCCESS" } else { "FAILED" }
-
-                    Write-Host "  Cover: $shortNameA cover generation $statusA, $shortNameB cover generation $statusB" -ForegroundColor Yellow
-                }
-            }
-
-            Write-Host "  If the winner failed to generate images or cover, the result may not represent true performance!" -ForegroundColor Red
-            Write-Host ""
-        }
-
         # Summary
         $aWins = 0
         $bWins = 0
@@ -2059,6 +2053,45 @@ function Start-AnalyzeLogs {
         Write-Host "  $($summaryNameB.PadRight($labelWidth)): $("$bWins".PadLeft($numWidth)) wins"  -ForegroundColor Blue
         Write-Host "  $("Ties".PadRight($labelWidth)): $("$ties".PadLeft($numWidth)) pages" -ForegroundColor Gray
         Write-Host ""
+
+        # Aggregate cover and image counts
+        $covSuccessA = 0; $covFailedA = 0
+        $covSuccessB = 0; $covFailedB = 0
+        $imgSuccessA = 0; $imgFailedA = 0
+        $imgSuccessB = 0; $imgFailedB = 0
+        foreach ($page in ($comparison | Where-Object { $_.Page -like "*Cover*" })) {
+            $csA = $page."${colA}_CoverSuccess"
+            $csB = $page."${colB}_CoverSuccess"
+            if ($csA) { $covSuccessA++ } else { $covFailedA++ }
+            if ($csB) { $covSuccessB++ } else { $covFailedB++ }
+        }
+        foreach ($page in ($comparison | Where-Object { $_.Page -notlike "*Cover*" -and ([int]$_.$imgColA -gt 0 -or [int]$_.$imgColB -gt 0) })) {
+            if ([int]$page.$imgColA -gt 0) { $imgSuccessA++ } else { $imgFailedA++ }
+            if ([int]$page.$imgColB -gt 0) { $imgSuccessB++ } else { $imgFailedB++ }
+        }
+
+        if ($pagesWithWarnings) {
+            Write-WithWarning "[!] UNFAIR COMPARISONS DETECTED:" "Red"
+        }
+
+        $labelW = [Math]::Max("Cover ".Length, "Images".Length)
+        $covStatusA = if ($covSuccessA -gt 0) { "Success" } else { "Failed" }
+        $covStatusB = if ($covSuccessB -gt 0) { "Success" } else { "Failed" }
+        $covLeft  = "  $("Cover".PadRight($labelW)): $shortNameA $covStatusA"
+        $imgLeft  = "  $("Images".PadRight($labelW)): $shortNameA Success: $imgSuccessA, Failed: $imgFailedA"
+        $pipeCol  = [Math]::Max($covLeft.Length, $imgLeft.Length)
+        if (($covSuccessA + $covFailedA) -gt 0) {
+            Write-Host "$($covLeft.PadRight($pipeCol))  |  $shortNameB $covStatusB" -ForegroundColor Yellow
+        }
+        if (($imgSuccessA + $imgFailedA) -gt 0) {
+            Write-Host "$($imgLeft.PadRight($pipeCol))  |  $shortNameB Success: $imgSuccessB, Failed: $imgFailedB" -ForegroundColor Yellow
+        }
+        if ($pagesWithWarnings) {
+            Write-Host "  If the winner failed to generate images or cover, the result may not represent true performance!" -ForegroundColor Red
+        }
+        if ($pagesWithWarnings -or ($covSuccessA + $covFailedA) -gt 0 -or ($imgSuccessA + $imgFailedA) -gt 0) {
+            Write-Host ""
+        }
 
         # Comparative averages
         $avgA = ($comparison | ForEach-Object { $_.$colA } | Measure-Object -Average).Average
