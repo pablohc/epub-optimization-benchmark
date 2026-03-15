@@ -21,7 +21,7 @@ $global:CaptureSuccess = $false
 # ============================================================
 
 # Directory for firmware cache
-$firmwareCacheDir = Join-Path $PSScriptRoot "firmware_cache"
+$firmwareCacheDir = Join-Path $logsDir "firmware_cache"
 if (-not (Test-Path $firmwareCacheDir)) {
     New-Item -ItemType Directory -Path $firmwareCacheDir | Out-Null
 }
@@ -283,9 +283,14 @@ function Show-CaptureCompleteMenu {
 
 function Show-UnfairComparisonWarning {
     Write-Host ""
-    Write-Host "  WARNING: Pages marked with [!] have differences that make comparisons unfair" -ForegroundColor Yellow
-    Write-Host "    Faster times may be due to missing images or failed cover generation," -ForegroundColor Yellow
-    Write-Host "    not real performance improvements" -ForegroundColor Yellow
+    Write-Host "[!] CONTENT DISCREPANCY WARNING:" -ForegroundColor Yellow
+    Write-Host "  Pages marked with [!] have differences in images or cover generation between versions." -ForegroundColor Yellow
+    Write-Host "  - If the WINNER had fewer images/failed cover: result may be MISLEADING" -ForegroundColor Yellow
+    Write-Host "    (faster because it did less work, not truly faster)" -ForegroundColor Yellow
+    Write-Host "  - If the LOSER had fewer images/failed cover: result is CONSERVATIVE" -ForegroundColor Yellow
+    Write-Host "    (winner did more work and still won)" -ForegroundColor Yellow
+    Write-Host ""
+
 }
 
 # ============================================================
@@ -385,10 +390,7 @@ function Start-SingleDeviceCapture {
     Write-Host "Output file:" -ForegroundColor Green
     Write-Host "  $fileName" -ForegroundColor Gray
     Write-Host ""
-    Write-Host "NOTE: Please RESTART the device to capture firmware version" -ForegroundColor Yellow
-    Write-Host "      Device restart is required for firmware detection" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "Press ENTER when device is restarting..." -ForegroundColor Yellow
+    Write-Host "Press ENTER para comenzar a capturar..." -ForegroundColor Yellow
     Read-Host
 
     Clear-Host
@@ -870,10 +872,7 @@ function Start-DualDeviceCapture {
         Write-Host "  LEFT device: $fileA" -ForegroundColor Gray
         Write-Host "  RIGHT device: $fileB" -ForegroundColor Gray
         Write-Host ""
-        Write-Host "NOTE: Please RESTART both devices to capture firmware versions" -ForegroundColor Yellow
-        Write-Host "      Device restart is required for firmware detection" -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "Press ENTER when both devices are restarting..." -ForegroundColor Yellow
+        Write-Host "Press ENTER para comenzar a capturar..." -ForegroundColor Yellow
         Read-Host
 
         Clear-Host
@@ -1650,18 +1649,42 @@ function Start-AnalyzeLogs {
         $logA = $logsWithTimes[0]
         $logB = $logsWithTimes[1]
 
+        $standardTypes = @("ORIGINAL", "OPTIMIZED")
+        $useAliases = ($logA.Type -notin $standardTypes -or $logB.Type -notin $standardTypes) -and -not ($logA.Port -eq $logB.Port -and $logA.Type -eq $logB.Type)
+
         if ($logA.Port -eq $logB.Port -and $logA.Type -eq $logB.Type) {
             # Same device and book = use Test1/Test2 to avoid duplicate column names
             $colA = "Test1_ms"
             $colB = "Test2_ms"
             $displayColA = "Test1"
             $displayColB = "Test2"
+        } elseif ($useAliases) {
+            # Custom type names = use short A/B aliases to avoid wide columns
+            $colA = "A_ms"
+            $colB = "B_ms"
+            $displayColA = "A_ms"
+            $displayColB = "B_ms"
         } else {
             # Different devices or books = use Port_Type format
             $colA = "$($logA.Port)_$($logA.Type)_ms"
             $colB = "$($logB.Port)_$($logB.Type)_ms"
             $displayColA = "$($logA.Port) ($($logA.Type))"
             $displayColB = "$($logB.Port) ($($logB.Type))"
+        }
+
+        # Determine winner label values and image column names
+        if ($useAliases) {
+            $winnerA = "A"; $winnerB = "B"
+            $imgColA = "A_img"; $imgColB = "B_img"
+        } elseif ($logA.Port -eq $logB.Port -and $logA.Type -eq $logB.Type) {
+            $winnerA = "Test1"; $winnerB = "Test2"
+            $imgColA = "Images_Test1"; $imgColB = "Images_Test2"
+        } elseif ($uniqueTypes -gt 1) {
+            $winnerA = $logA.Type; $winnerB = $logB.Type
+            $imgColA = "Images_$($logA.Type)"; $imgColB = "Images_$($logB.Type)"
+        } else {
+            $winnerA = $logA.Port; $winnerB = $logB.Port
+            $imgColA = "Images_$($logA.Port)"; $imgColB = "Images_$($logB.Port)"
         }
     }
 
@@ -1753,7 +1776,7 @@ function Start-AnalyzeLogs {
         foreach ($row in $comparison) {
             $timeA = $row.$colA
             $timeB = $row.$colB
-            $diff = $timeA - $timeB
+            $diff = $timeB - $timeA
             $percent = if ($timeA -gt 0) { [Math]::Round(($diff / $timeA) * 100, 1) } else { 0 }
 
             # Check for image discrepancies (missing images = potentially unfair comparison)
@@ -1811,9 +1834,9 @@ function Start-AnalyzeLogs {
             if ([Math]::Abs($percent) -lt 1) {
                 $winner = "TIE"
             } elseif ($diff -lt 0) {
-                $winner = $logA.Type
+                $winner = $winnerB
             } elseif ($diff -gt 0) {
-                $winner = $logB.Type
+                $winner = $winnerA
             } else {
                 $winner = "TIE"
             }
@@ -1822,7 +1845,11 @@ function Start-AnalyzeLogs {
             # If comparing different book types (ORIGINAL vs OPTIMIZED), use TYPE
             # If comparing same book on different devices, use DEVICE/PORT
             # If comparing same device and book, use TEST1/TEST2
-            if ($uniqueTypes -gt 1) {
+            if ($useAliases) {
+                # Custom type names = use short A/B aliases
+                $imagesColA = "A_img"
+                $imagesColB = "B_img"
+            } elseif ($uniqueTypes -gt 1) {
                 # Book Type Comparison: Images_ORIGINAL, Images_OPTIMIZED
                 $imagesColA = "Images_$($logA.Type)"
                 $imagesColB = "Images_$($logB.Type)"
@@ -1876,52 +1903,84 @@ function Start-AnalyzeLogs {
             $comparisonTitle = "Device Performance"
         }
 
-        Write-Host "${comparisonTitle}: ${displayNameA} vs ${displayNameB}" -ForegroundColor Yellow
+        Write-Host "${comparisonTitle}: " -ForegroundColor Yellow -NoNewline
+        Write-Host "${displayNameA}" -ForegroundColor Green -NoNewline
+        Write-Host " vs " -ForegroundColor Yellow -NoNewline
+        Write-Host "${displayNameB}" -ForegroundColor Blue
+        if ($useAliases) {
+            Write-Host ""
+            Write-Host "  A = ${displayNameA}" -ForegroundColor DarkGreen
+            Write-Host "  B = ${displayNameB}" -ForegroundColor DarkBlue
+        }
         Write-Host ""
     }
 
-    # Build column headers
-    $headers = @("Page")
-    if ($logsWithTimes.Count -eq 2 -and $displayColA -and $displayColB) {
-        # Use the display names we determined earlier
-        $headers += $displayColA
-        $headers += $displayColB
-    } else {
-        # Fallback to port/type format
-        foreach ($log in $logsWithTimes) {
-            $headers += "$($log.Port) ($($log.Type))"
-        }
-    }
+    # Display table with color coding
+    if ($comparison.Count -gt 0 -and $logsWithTimes.Count -eq 2) {
+        # Build ordered properties
+        $allProperties = $comparison[0].PSObject.Properties.Name
+        $imageCols = $allProperties | Where-Object { ($_ -like "Images_*" -or $_ -like "*_img") -and $_ -notlike "*CoverSuccess" }
+        $orderedProperties = @("Page", $colA, $colB) + $imageCols + @("Diff_ms", "Percent", "Winner")
 
-    # Display table with custom formatting
-    # Build ordered list of properties to display, excluding hidden properties
-    if ($comparison.Count -gt 0) {
-        $orderedProperties = @("Page")
-
-        # Add time columns
-        if ($logsWithTimes.Count -eq 2) {
-            $orderedProperties += $colA
-            $orderedProperties += $colB
-
-            # Add image columns if they exist
-            $allProperties = $comparison[0].PSObject.Properties.Name
-            $imageCols = $allProperties | Where-Object { $_ -like "Images_*" -and $_ -notlike "*CoverSuccess" }
-            $orderedProperties += $imageCols
-
-            # Add comparison columns
-            $orderedProperties += "Diff_ms", "Percent", "Winner"
-        } else {
-            # Single or multiple logs: add all time columns
-            foreach ($log in $logsWithTimes) {
-                $timeCol = "$($log.Port)_$($log.Type)_ms"
-                if ($allProperties -contains $timeCol) {
-                    $orderedProperties += $timeCol
+        # Calculate column widths
+        $colWidths = @{}
+        foreach ($prop in $orderedProperties) {
+            $maxLen = $prop.Length
+            foreach ($row in $comparison) {
+                $pv = $row.PSObject.Properties[$prop]
+                if ($null -ne $pv -and $null -ne $pv.Value) {
+                    $len = $pv.Value.ToString().Length
+                    if ($len -gt $maxLen) { $maxLen = $len }
                 }
             }
+            $colWidths[$prop] = $maxLen
         }
 
-        $comparison | Format-Table -Property $orderedProperties -AutoSize
-    } else {
+        # Print header row
+        foreach ($prop in $orderedProperties) {
+            $color = if ($prop -eq $colA -or $prop -eq $imgColA) { "Green" }
+                     elseif ($prop -eq $colB -or $prop -eq $imgColB) { "Blue" }
+                     else { "White" }
+            Write-Host ("{0,-$($colWidths[$prop])}" -f $prop) -ForegroundColor $color -NoNewline
+            Write-Host "  " -NoNewline
+        }
+        Write-Host ""
+
+        # Print separator
+        foreach ($prop in $orderedProperties) {
+            Write-Host ("{0,-$($colWidths[$prop])}" -f ("-" * $colWidths[$prop])) -NoNewline
+            Write-Host "  " -NoNewline
+        }
+        Write-Host ""
+
+        # Print data rows
+        foreach ($row in $comparison) {
+            foreach ($prop in $orderedProperties) {
+                $pv = $row.PSObject.Properties[$prop]
+                $strVal = if ($null -ne $pv -and $null -ne $pv.Value) { $pv.Value.ToString() } else { "" }
+                $width = $colWidths[$prop]
+
+                if ($prop -eq $colA -or $prop -eq $imgColA) {
+                    $color = "Green"
+                } elseif ($prop -eq $colB -or $prop -eq $imgColB) {
+                    $color = "Blue"
+                } elseif ($prop -eq "Winner") {
+                    $bare = $strVal -replace " \[!\]", ""
+                    $color = if ($bare -eq "TIE") { "Gray" }
+                             elseif ($bare -eq $winnerA) { "Green" }
+                             elseif ($bare -eq $winnerB) { "Blue" }
+                             else { "White" }
+                } else {
+                    $color = "White"
+                }
+
+                Write-Host ("{0,-$width}" -f $strVal) -ForegroundColor $color -NoNewline
+                Write-Host "  " -NoNewline
+            }
+            Write-Host ""
+        }
+    } elseif ($comparison.Count -gt 0) {
+        # Fallback for non-2-log comparisons
         $comparison | Format-Table -AutoSize
     }
 
@@ -1929,16 +1988,16 @@ function Start-AnalyzeLogs {
     if ($logsWithTimes.Count -eq 2) {
 
         # Column legend
-        Write-Host "Legend:" -ForegroundColor Cyan
-        Write-Host "  - $displayNameA : When $displayNameA is faster" -ForegroundColor Green
-        Write-Host "  - $displayNameB : When $displayNameB is faster" -ForegroundColor Blue
-        Write-Host "  - TIE : When the difference is < 1% (statistically insignificant)" -ForegroundColor Gray
         Write-Host ""
-        Write-Host "[!] UNFAIR COMPARISON WARNING:" -ForegroundColor Yellow
-        Write-Host "  Pages marked with [!] may have unfair performance differences:" -ForegroundColor Yellow
-        Write-Host "  - Cover generation: FAILED vs SUCCESS (faster time may mean missing cover processing)" -ForegroundColor Yellow
-        Write-Host "  - Missing images: One version loaded fewer images than the other" -ForegroundColor Yellow
-        Write-Host "  These differences represent MISSING/FAILED content, NOT real performance improvements!" -ForegroundColor Yellow
+        Write-Host "Legend:" -ForegroundColor Cyan
+        if ($useAliases) {
+            Write-Host "  - A: $($logA.Type) ($($logA.FirmwareBranch)) is faster" -ForegroundColor Green
+            Write-Host "  - B: $($logB.Type) ($($logB.FirmwareBranch)) is faster" -ForegroundColor Blue
+        } else {
+            Write-Host "  - $displayNameA : When $displayNameA is faster" -ForegroundColor Green
+            Write-Host "  - $displayNameB : When $displayNameB is faster" -ForegroundColor Blue
+        }
+        Write-Host "  - TIE: When the difference is < 1% (statistically insignificant)" -ForegroundColor Gray
         Write-Host ""
 
         # Image discrepancy warning
@@ -1955,7 +2014,10 @@ function Start-AnalyzeLogs {
                     $statusB = if ($coverSuccessB) { "SUCCESS" } else { "FAILED" }
 
                     # Determine display names based on comparison type
-                    if ($uniqueTypes -gt 1) {
+                    if ($useAliases) {
+                        $coverNameA = "A"
+                        $coverNameB = "B"
+                    } elseif ($uniqueTypes -gt 1) {
                         $coverNameA = $logA.Type
                         $coverNameB = $logB.Type
                     } elseif ($uniquePorts -eq 1 -and $uniqueTypes -eq 1) {
@@ -1970,7 +2032,7 @@ function Start-AnalyzeLogs {
                 }
             }
 
-            Write-Host "  These comparisons may not reflect real performance differences!" -ForegroundColor Red
+            Write-Host "  If the winner failed to generate images or cover, the result may not represent true performance!" -ForegroundColor Red
             Write-Host ""
         }
 
@@ -1980,9 +2042,10 @@ function Start-AnalyzeLogs {
         $ties = 0
 
         foreach ($row in $comparison) {
-            if ($row.Winner -eq $logA.Type) { $aWins++ }
-            elseif ($row.Winner -eq $logB.Type) { $bWins++ }
-            elseif ($row.Winner -eq "TIE") { $ties++ }
+            $bareWinner = $row.Winner -replace " \[!\]", ""
+            if ($bareWinner -eq $winnerA) { $aWins++ }
+            elseif ($bareWinner -eq $winnerB) { $bWins++ }
+            elseif ($bareWinner -eq "TIE") { $ties++ }
         }
 
         Write-Host "Summary:" -ForegroundColor Cyan
@@ -2259,14 +2322,26 @@ function Start-AnalyzeLogs {
 
         $maxLabelWidth = [Math]::Max($label1.Length, [Math]::Max($label2.Length, [Math]::Max($label3.Length, $label4.Length)))
 
-        # Check if we have unfair comparisons from Optimization Impact section
+        # Check if the overall winner's advantage may be unfair:
+        # Only flag [!] if the winner had fewer images/failed cover on [!] pages
+        # (if the loser failed, the winner's advantage is conservative, not misleading)
         $hasUnfairComparisonInOptimization = $false
-        if ($uniqueTypes -gt 1) {
-            $mostImproved = $comparison | Sort-Object -Property Diff_ms -Descending | Select-Object -First 1
-            $leastImproved = $comparison | Sort-Object -Property Diff_ms | Select-Object -First 1
-            $mostImprovedHasWarning = $mostImproved.Winner -like "*[!]*"
-            $leastImprovedHasWarning = $leastImproved.Winner -like "*[!]*"
-            $hasUnfairComparisonInOptimization = $mostImprovedHasWarning -or $leastImprovedHasWarning
+        $pagesWithWarnings = $comparison | Where-Object { $_.Winner -like "*[!]*" }
+        foreach ($wPage in $pagesWithWarnings) {
+            $pageWinner = ($wPage.Winner -replace " \[!\]", "")
+            $overallWinnerWonThisPage = ($totalTimeSaved -lt 0 -and $pageWinner -eq $winnerA) -or
+                                        ($totalTimeSaved -gt 0 -and $pageWinner -eq $winnerB)
+            if ($overallWinnerWonThisPage) {
+                $imgAval = $wPage.PSObject.Properties[$imgColA]
+                $imgBval = $wPage.PSObject.Properties[$imgColB]
+                $imgA = if ($null -ne $imgAval) { [int]$imgAval.Value } else { 0 }
+                $imgB = if ($null -ne $imgBval) { [int]$imgBval.Value } else { 0 }
+                # Winner had fewer images = potentially unfair advantage
+                if (($totalTimeSaved -lt 0 -and $imgA -lt $imgB) -or
+                    ($totalTimeSaved -gt 0 -and $imgB -lt $imgA)) {
+                    $hasUnfairComparisonInOptimization = $true
+                }
+            }
         }
 
         # Prepare values for decimal alignment
@@ -2408,14 +2483,15 @@ function Start-AnalyzeLogs {
                     Write-Host "$($timeB.ToString().PadLeft(4))ms " -NoNewline -ForegroundColor Gray
 
                     # Winner with color coding
-                    if ($row.Winner -eq "TIE") {
+                    $bareWinnerChart = $row.Winner -replace " \[!\]", ""
+                    if ($bareWinnerChart -eq "TIE") {
                         Write-Host $row.Winner -ForegroundColor Gray
-                    } elseif ($row.Winner -match $logA.Type) {
-                        $winnerShort = if ($logA.Type.Length -gt 8) { $logA.Type.Substring(0, 6) + ".." } else { $logA.Type }
-                        Write-Host $winnerShort -ForegroundColor Green
+                    } elseif ($bareWinnerChart -eq $winnerA) {
+                        $winnerShort = if ($winnerA.Length -gt 8) { $winnerA.Substring(0, 6) + ".." } else { $winnerA }
+                        Write-Host "$winnerShort$(if ($row.Winner -like '*[!]*') { ' [!]' })" -ForegroundColor Green
                     } else {
-                        $winnerShort = if ($logB.Type.Length -gt 8) { $logB.Type.Substring(0, 6) + ".." } else { $logB.Type }
-                        Write-Host $winnerShort -ForegroundColor Blue
+                        $winnerShort = if ($winnerB.Length -gt 8) { $winnerB.Substring(0, 6) + ".." } else { $winnerB }
+                        Write-Host "$winnerShort$(if ($row.Winner -like '*[!]*') { ' [!]' })" -ForegroundColor Blue
                     }
                 }
                 Write-Host ""
