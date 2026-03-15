@@ -1575,6 +1575,19 @@ function Start-AnalyzeLogs {
         $coverTime = Get-CoverGenerationTime $log.Path -DebugMode:$false
         $log | Add-Member -MemberType NoteProperty -Name "CoverGenerationTime" -Value $coverTime -Force
 
+        # Extract epub path and folder from "Loading ePub:" log line
+        # e.g. "[DBG] [EBP] Loading ePub: /01 - Original/orig-01-txt-only/Book.epub"
+        $epubPath   = $null
+        $epubFolder = $null
+        $loadingLine = Get-Content $log.Path | Where-Object { $_ -match '\[EBP\]\s+Loading ePub:' } | Select-Object -First 1
+        if ($loadingLine -and $loadingLine -match 'Loading ePub:\s+(.+)$') {
+            $epubPath   = $matches[1].Trim()
+            # Extract immediate parent folder (e.g. "orig-01-txt-only")
+            $epubFolder = ($epubPath -split '/' | Select-Object -Last 2 | Select-Object -First 1).Trim()
+        }
+        $log | Add-Member -MemberType NoteProperty -Name "EpubPath"   -Value $epubPath   -Force
+        $log | Add-Member -MemberType NoteProperty -Name "EpubFolder" -Value $epubFolder -Force
+
         $logsWithTimes += $log
 
         # Display summary for this log
@@ -1649,42 +1662,21 @@ function Start-AnalyzeLogs {
         $logA = $logsWithTimes[0]
         $logB = $logsWithTimes[1]
 
-        $standardTypes = @("ORIGINAL", "OPTIMIZED")
-        $useAliases = ($logA.Type -notin $standardTypes -or $logB.Type -notin $standardTypes) -and -not ($logA.Port -eq $logB.Port -and $logA.Type -eq $logB.Type)
+        # Always use A/B for columns, winner labels, and image columns
+        $useAliases  = $true
+        $colA        = "A_ms";   $colB        = "B_ms"
+        $displayColA = "A_ms";   $displayColB = "B_ms"
+        $winnerA     = "A";      $winnerB     = "B"
+        $imgColA     = "A_img";  $imgColB     = "B_img"
 
+        # Short display names used in all sections below
+        # Rule: type only; add port if same type; Test1/Test2 if same type+port
         if ($logA.Port -eq $logB.Port -and $logA.Type -eq $logB.Type) {
-            # Same device and book = use Test1/Test2 to avoid duplicate column names
-            $colA = "Test1_ms"
-            $colB = "Test2_ms"
-            $displayColA = "Test1"
-            $displayColB = "Test2"
-        } elseif ($useAliases) {
-            # Custom type names = use short A/B aliases to avoid wide columns
-            $colA = "A_ms"
-            $colB = "B_ms"
-            $displayColA = "A_ms"
-            $displayColB = "B_ms"
+            $shortNameA = "Test1"; $shortNameB = "Test2"
+        } elseif ($logA.Type -eq $logB.Type) {
+            $shortNameA = "$($logA.Type) ($($logA.Port))"; $shortNameB = "$($logB.Type) ($($logB.Port))"
         } else {
-            # Different devices or books = use Port_Type format
-            $colA = "$($logA.Port)_$($logA.Type)_ms"
-            $colB = "$($logB.Port)_$($logB.Type)_ms"
-            $displayColA = "$($logA.Port) ($($logA.Type))"
-            $displayColB = "$($logB.Port) ($($logB.Type))"
-        }
-
-        # Determine winner label values and image column names
-        if ($useAliases) {
-            $winnerA = "A"; $winnerB = "B"
-            $imgColA = "A_img"; $imgColB = "B_img"
-        } elseif ($logA.Port -eq $logB.Port -and $logA.Type -eq $logB.Type) {
-            $winnerA = "Test1"; $winnerB = "Test2"
-            $imgColA = "Images_Test1"; $imgColB = "Images_Test2"
-        } elseif ($uniqueTypes -gt 1) {
-            $winnerA = $logA.Type; $winnerB = $logB.Type
-            $imgColA = "Images_$($logA.Type)"; $imgColB = "Images_$($logB.Type)"
-        } else {
-            $winnerA = $logA.Port; $winnerB = $logB.Port
-            $imgColA = "Images_$($logA.Port)"; $imgColB = "Images_$($logB.Port)"
+            $shortNameA = $logA.Type; $shortNameB = $logB.Type
         }
     }
 
@@ -1887,28 +1879,22 @@ function Start-AnalyzeLogs {
         $logA = $logsWithTimes[0]
         $logB = $logsWithTimes[1]
 
-        # Determine display names and comparison title
+        # Determine comparison title (display names reuse $shortNameA/B)
         if ($uniqueTypes -gt 1) {
-            $displayNameA = "$($logA.Type) [$($logA.FirmwareBranch)]"
-            $displayNameB = "$($logB.Type) [$($logB.FirmwareBranch)]"
             $comparisonTitle = "Book Version"
         } elseif ($uniquePorts -eq 1 -and $uniqueTypes -eq 1) {
-            # Same device, same book = different tests
-            $displayNameA = "Test 1 ($($logA.Port)) [$($logA.FirmwareBranch)]"
-            $displayNameB = "Test 2 ($($logB.Port)) [$($logB.FirmwareBranch)]"
             $comparisonTitle = "Same Device Repeatability Test"
         } else {
-            $displayNameA = "$($logA.Port) [$($logA.FirmwareBranch)]"
-            $displayNameB = "$($logB.Port) [$($logB.FirmwareBranch)]"
             $comparisonTitle = "Device Performance"
         }
+        $displayNameA = $shortNameA
+        $displayNameB = $shortNameB
 
         Write-Host "${comparisonTitle}: " -ForegroundColor Yellow -NoNewline
         Write-Host "${displayNameA}" -ForegroundColor Green -NoNewline
         Write-Host " vs " -ForegroundColor Yellow -NoNewline
         Write-Host "${displayNameB}" -ForegroundColor Blue
         if ($useAliases) {
-            Write-Host ""
             Write-Host "  A = ${displayNameA}" -ForegroundColor DarkGreen
             Write-Host "  B = ${displayNameB}" -ForegroundColor DarkBlue
         }
@@ -1991,11 +1977,11 @@ function Start-AnalyzeLogs {
         Write-Host ""
         Write-Host "Legend:" -ForegroundColor Cyan
         if ($useAliases) {
-            Write-Host "  - A: $($logA.Type) ($($logA.FirmwareBranch)) is faster" -ForegroundColor Green
-            Write-Host "  - B: $($logB.Type) ($($logB.FirmwareBranch)) is faster" -ForegroundColor Blue
+            Write-Host "  - A: ${displayNameA} is faster" -ForegroundColor Green
+            Write-Host "  - B: ${displayNameB} is faster" -ForegroundColor Blue
         } else {
-            Write-Host "  - $displayNameA : When $displayNameA is faster" -ForegroundColor Green
-            Write-Host "  - $displayNameB : When $displayNameB is faster" -ForegroundColor Blue
+            Write-Host "  - Test1: ${displayNameA} is faster" -ForegroundColor Green
+            Write-Host "  - Test2: ${displayNameB} is faster" -ForegroundColor Blue
         }
         Write-Host "  - TIE: When the difference is < 1% (statistically insignificant)" -ForegroundColor Gray
         Write-Host ""
@@ -2050,25 +2036,16 @@ function Start-AnalyzeLogs {
 
         Write-Host "Summary:" -ForegroundColor Cyan
 
-        # Determine display names for summary
-        if ($uniqueTypes -gt 1) {
-            $summaryNameA = $logA.Type
-            $summaryNameB = $logB.Type
-        } elseif ($uniquePorts -eq 1 -and $uniqueTypes -eq 1) {
-            $summaryNameA = "Test 1"
-            $summaryNameB = "Test 2"
-        } else {
-            $summaryNameA = "$($logA.Port) ($($logA.Type))"
-            $summaryNameB = "$($logB.Port) ($($logB.Type))"
-        }
+        $summaryNameA = $shortNameA
+        $summaryNameB = $shortNameB
 
-        # Calculate max label width for alignment
-        $maxLabelWidth = [Math]::Max($summaryNameA.Length, [Math]::Max($summaryNameB.Length, 4))
-        $labelWidth = $maxLabelWidth + 1
+        # Calculate widths for two-column alignment: label: {n} unit
+        $labelWidth = [Math]::Max($summaryNameA.Length, [Math]::Max($summaryNameB.Length, "Ties".Length))
+        $numWidth   = [Math]::Max("$aWins".Length, [Math]::Max("$bWins".Length, "$ties".Length))
 
-        Write-Host "  $($summaryNameA.PadRight($labelWidth)): $aWins wins" -ForegroundColor Green
-        Write-Host "  $($summaryNameB.PadRight($labelWidth)): $bWins wins" -ForegroundColor Blue
-        Write-Host "  $("Ties".PadRight($labelWidth)): $ties pages" -ForegroundColor Gray
+        Write-Host "  $($summaryNameA.PadRight($labelWidth)): $("$aWins".PadLeft($numWidth)) wins"  -ForegroundColor Green
+        Write-Host "  $($summaryNameB.PadRight($labelWidth)): $("$bWins".PadLeft($numWidth)) wins"  -ForegroundColor Blue
+        Write-Host "  $("Ties".PadRight($labelWidth)): $("$ties".PadLeft($numWidth)) pages" -ForegroundColor Gray
         Write-Host ""
 
         # Comparative averages
@@ -2077,25 +2054,17 @@ function Start-AnalyzeLogs {
         $avgDiff = $avgA - $avgB
         $avgPercent = if ($avgA -gt 0) { [Math]::Round(($avgDiff / $avgA) * 100, 1) } else { 0 }
 
+        $avgAStr = "$([Math]::Round($avgA, 0))"
+        $avgBStr = "$([Math]::Round($avgB, 0))"
+        $avgNumWidth = [Math]::Max($avgAStr.Length, $avgBStr.Length)
+
         Write-Host "Averages:" -ForegroundColor Cyan
-        Write-Host "  $($summaryNameA.PadRight($labelWidth)): $([Math]::Round($avgA, 0)) ms" -ForegroundColor Green
-        Write-Host "  $($summaryNameB.PadRight($labelWidth)): $([Math]::Round($avgB, 0)) ms" -ForegroundColor Blue
+        Write-Host "  $($summaryNameA.PadRight($labelWidth)): $($avgAStr.PadLeft($avgNumWidth)) ms" -ForegroundColor Green
+        Write-Host "  $($summaryNameB.PadRight($labelWidth)): $($avgBStr.PadLeft($avgNumWidth)) ms" -ForegroundColor Blue
         Write-Host ""
 
-        # Determine display names for result message
-        if ($uniqueTypes -gt 1) {
-            $resultNameA = $logA.Type
-            $resultNameB = $logB.Type
-            $resultType = "book version"
-        } elseif ($uniquePorts -eq 1 -and $uniqueTypes -eq 1) {
-            $resultNameA = "Test 1"
-            $resultNameB = "Test 2"
-            $resultType = "test"
-        } else {
-            $resultNameA = $logA.Port
-            $resultNameB = $logB.Port
-            $resultType = "device"
-        }
+        $resultNameA = $shortNameA
+        $resultNameB = $shortNameB
 
         # Check if difference is statistically significant (> 1%)
         if ([Math]::Abs($avgPercent) -lt 1) {
@@ -2105,7 +2074,7 @@ function Start-AnalyzeLogs {
         } elseif ($avgDiff -gt 0) {
             Write-Host "  Result: $resultNameB is $([Math]::Round([Math]::Abs($avgDiff), 1)) ms faster than $resultNameA ($([Math]::Abs($avgPercent))%)" -ForegroundColor Blue
         } else {
-            Write-Host "  Result: TIE (both $resultType" + "s have equal performance)" -ForegroundColor Yellow
+            Write-Host "  Result: TIE (equal performance)" -ForegroundColor Yellow
         }
         Write-Host ""
     }
@@ -2138,14 +2107,8 @@ function Start-AnalyzeLogs {
         $cvA = if ($avgA -gt 0) { ($stdDevA / $avgA) * 100 } else { 0 }
         $cvB = if ($avgB -gt 0) { ($stdDevB / $avgB) * 100 } else { 0 }
 
-        # Determine display names based on comparison type
-        if ($uniqueTypes -gt 1) {
-            $displayNameA = $logA.Type
-            $displayNameB = $logB.Type
-        } else {
-            $displayNameA = "Device A"
-            $displayNameB = "Device B"
-        }
+        $displayNameA = $shortNameA
+        $displayNameB = $shortNameB
 
         # Calculate column widths
         $labelWidth = 20
@@ -2194,17 +2157,8 @@ function Start-AnalyzeLogs {
         $cvA = if ($avgA -gt 0) { ($stdDevA / $avgA) * 100 } else { 0 }
         $cvB = if ($avgB -gt 0) { ($stdDevB / $avgB) * 100 } else { 0 }
 
-        # Determine display names for consistency analysis
-        if ($uniqueTypes -gt 1) {
-            $consistencyNameA = "$($logA.Type) [$($logA.FirmwareBranch)]"
-            $consistencyNameB = "$($logB.Type) [$($logB.FirmwareBranch)]"
-        } elseif ($uniquePorts -eq 1 -and $uniqueTypes -eq 1) {
-            $consistencyNameA = "Test 1 [$($logA.FirmwareBranch)]"
-            $consistencyNameB = "Test 2 [$($logB.FirmwareBranch)]"
-        } else {
-            $consistencyNameA = "$($logA.Port) [$($logA.FirmwareBranch)]"
-            $consistencyNameB = "$($logB.Port) [$($logB.FirmwareBranch)]"
-        }
+        $consistencyNameA = $shortNameA
+        $consistencyNameB = $shortNameB
 
         Write-Host ""
         Write-Host "Consistency Analysis:" -ForegroundColor Cyan
@@ -2215,55 +2169,50 @@ function Start-AnalyzeLogs {
 
     # Optimization Impact / Performance Highlights (for 2-log comparisons only)
     if ($logsWithTimes.Count -eq 2) {
-        # Determine display names based on comparison type
+        $displayNameA = $shortNameA
+        $displayNameB = $shortNameB
         if ($uniqueTypes -gt 1) {
-            $displayNameA = "$($logA.Type) [$($logA.FirmwareBranch)]"
-            $displayNameB = "$($logB.Type) [$($logB.FirmwareBranch)]"
             $sectionTitle = "Optimization Impact"
 
-            # Find pages where OPTIMIZED improved the most
-            $mostImproved = $comparison | Sort-Object -Property Diff_ms -Descending | Select-Object -First 1
-            $leastImproved = $comparison | Sort-Object -Property Diff_ms | Select-Object -First 1
+            # Diff = B - A: most negative = B improved most, most positive = B regressed most
+            $mostImproved  = $comparison | Sort-Object -Property Diff_ms           | Select-Object -First 1
+            $leastImproved = $comparison | Sort-Object -Property Diff_ms -Descending | Select-Object -First 1
 
-            # Extract numeric percentage from string (e.g., "0.1%" -> 0.1)
-            $mostImprovedPercent = [double]($mostImproved.Percent -replace '%', '')
+            # Extract numeric percentage from string (e.g., "-92.6%" -> -92.6)
+            $mostImprovedPercent  = [double]($mostImproved.Percent  -replace '%', '')
             $leastImprovedPercent = [double]($leastImproved.Percent -replace '%', '')
 
-            # Check if the "least improved" actually got worse (negative diff)
-            $gotWorse = $leastImproved.Diff_ms -lt 0
+            # Positive diff = A won = B got worse
+            $gotWorse = $leastImproved.Diff_ms -gt 0
 
             Write-Host "${sectionTitle}:" -ForegroundColor Cyan
 
             # Check for warnings
-            $mostImprovedHasWarning = $mostImproved.Winner -like "*[!]*"
+            $mostImprovedHasWarning  = $mostImproved.Winner  -like "*[!]*"
             $leastImprovedHasWarning = $leastImproved.Winner -like "*[!]*"
             $hasUnfairComparison = $mostImprovedHasWarning -or $leastImprovedHasWarning
 
-            # Only show "faster" if improvement > 1%
-            if ($mostImprovedPercent -gt 1) {
+            # Most improved: B had the most negative diff
+            $pageDisplay = if ($mostImproved.Page -like "Cover*") { $mostImproved.Page } else { "Page $($mostImproved.Page)" }
+            if ([Math]::Abs($mostImprovedPercent) -gt 1) {
                 $warningText = if ($mostImprovedHasWarning) { " [!]" } else { "" }
-                $pageDisplay = if ($mostImproved.Page -like "Cover*") { $mostImproved.Page } else { "Page $($mostImproved.Page)" }
-                Write-Host "  Most improved:  $pageDisplay - $displayNameB is $($mostImproved.Diff_ms)ms faster ($($mostImproved.Percent))$warningText" -ForegroundColor Green
+                Write-Host "  Most improved:  $pageDisplay ($displayNameB) is $([Math]::Abs($mostImproved.Diff_ms))ms faster ($($mostImproved.Percent))$warningText" -ForegroundColor Green
             } else {
-                $pageDisplay = if ($mostImproved.Page -like "Cover*") { $mostImproved.Page } else { "Page $($mostImproved.Page)" }
-                Write-Host "  Most improved:  $pageDisplay - $displayNameB is $($mostImproved.Diff_ms)ms ($($mostImproved.Percent)) - statistically insignificant" -ForegroundColor Gray
+                Write-Host "  Most improved:  $pageDisplay ($displayNameB) is $([Math]::Abs($mostImproved.Diff_ms))ms faster ($($mostImproved.Percent)) - statistically insignificant" -ForegroundColor Gray
             }
 
-            if ($gotWorse -and [Math]::Abs($leastImprovedPercent) -gt 1) {
+            # Worst case for B: regression or least improved
+            $pageDisplay = if ($leastImproved.Page -like "Cover*") { $leastImproved.Page } else { "Page $($leastImproved.Page)" }
+            if ($gotWorse -and $leastImprovedPercent -gt 1) {
                 $warningText = if ($leastImprovedHasWarning) { " [!]" } else { "" }
-                $pageDisplay = if ($leastImproved.Page -like "Cover*") { $leastImproved.Page } else { "Page $($leastImproved.Page)" }
-                Write-Host "  Regression:     $pageDisplay - $displayNameB is $($leastImproved.Diff_ms)ms SLOWER ($($leastImproved.Percent))$warningText" -ForegroundColor Red
+                Write-Host "  Regression:     $pageDisplay ($displayNameB) is $($leastImproved.Diff_ms)ms SLOWER ($($leastImproved.Percent))$warningText" -ForegroundColor Red
             } elseif ($gotWorse) {
-                $pageDisplay = if ($leastImproved.Page -like "Cover*") { $leastImproved.Page } else { "Page $($leastImproved.Page)" }
-                Write-Host "  Regression:     $pageDisplay - $displayNameB is $($leastImproved.Diff_ms)ms ($($leastImproved.Percent)) - statistically insignificant" -ForegroundColor Gray
+                Write-Host "  Regression:     $pageDisplay ($displayNameB) is $($leastImproved.Diff_ms)ms slower ($($leastImproved.Percent)) - statistically insignificant" -ForegroundColor Gray
             } else {
-                $pageDisplay = if ($leastImproved.Page -like "Cover*") { $leastImproved.Page } else { "Page $($leastImproved.Page)" }
-                Write-Host "  Least improved: $pageDisplay - $displayNameB is only $($leastImproved.Diff_ms)ms faster ($($leastImproved.Percent))" -ForegroundColor Yellow
+                Write-Host "  Least improved: $pageDisplay ($displayNameB) is only $([Math]::Abs($leastImproved.Diff_ms))ms faster ($($leastImproved.Percent))" -ForegroundColor Yellow
             }
         } else {
             # Same book type: Device comparison
-            $displayNameA = "$($logA.Port) [$($logA.FirmwareBranch)]"
-            $displayNameB = "$($logB.Port) [$($logB.FirmwareBranch)]"
             $sectionTitle = "Performance Highlights"
 
             # Traditional best/worst based on pure difference
@@ -2279,8 +2228,8 @@ function Start-AnalyzeLogs {
             $bestWarningText = if ($bestCaseHasWarning) { " [!]" } else { "" }
             $worstWarningText = if ($worstCaseHasWarning) { " [!]" } else { "" }
 
-            Write-Host "  Best performer:  Page $($bestCase.Page) - $displayNameA faster by $($bestCase.Diff_ms)ms ($($bestCase.Percent))$bestWarningText" -ForegroundColor Green
-            Write-Host "  Worst performer: Page $($worstCase.Page) - $displayNameB faster by $($worstCase.Diff_ms)ms ($($worstCase.Percent))$worstWarningText" -ForegroundColor $(if ([Math]::Abs($worstCase.Diff_ms) -gt 1000) { "Red" } else { "Yellow" })
+            Write-Host "  Best performer:  Page $($bestCase.Page) ($displayNameA) faster by $($bestCase.Diff_ms)ms ($($bestCase.Percent))$bestWarningText" -ForegroundColor Green
+            Write-Host "  Worst performer: Page $($worstCase.Page) ($displayNameB) faster by $($worstCase.Diff_ms)ms ($($worstCase.Percent))$worstWarningText" -ForegroundColor $(if ([Math]::Abs($worstCase.Diff_ms) -gt 1000) { "Red" } else { "Yellow" })
 
             # Show warning if any highlighted page has issues
             if ($bestCaseHasWarning -or $worstCaseHasWarning) {
@@ -2300,17 +2249,8 @@ function Start-AnalyzeLogs {
         $totalTimeSaved = $totalTimeA - $totalTimeB
         $totalPages = $comparison.Count
 
-        # Determine display names based on comparison type
-        if ($uniqueTypes -gt 1) {
-            $displayNameA = $logA.Type
-            $displayNameB = $logB.Type
-        } elseif ($uniquePorts -eq 1 -and $uniqueTypes -eq 1) {
-            $displayNameA = "Test 1"
-            $displayNameB = "Test 2"
-        } else {
-            $displayNameA = "$($logA.Port)"
-            $displayNameB = "$($logB.Port)"
-        }
+        $displayNameA = $shortNameA
+        $displayNameB = $shortNameB
 
         Write-Host "Total Performance:" -ForegroundColor Cyan
 
@@ -2406,6 +2346,233 @@ function Start-AnalyzeLogs {
     Write-Host ""
     Write-Host "CSV exported: $outputFile" -ForegroundColor Green
 
+    # Export to JSON (2-log comparisons only - includes full metadata)
+    if ($logsWithTimes.Count -eq 2) {
+        # Parse firmware and branch from "1.1.1-dev+master" format
+        $fwPartsA = $logA.FirmwareBranch -split '\+', 2
+        $fwPartsB = $logB.FirmwareBranch -split '\+', 2
+
+        # Determine comparison type string
+        $compType = if ($useAliases) { "custom" }
+                    elseif ($uniquePorts -eq 1 -and $uniqueTypes -eq 1) { "repeatability" }
+                    elseif ($uniqueTypes -gt 1) { "book_type" }
+                    else { "device" }
+
+        # Clean book name for display
+        $cleanBook = ($logA.BookName -replace '\.epub(_\d{8}(_\d{6})?)?$', '') -replace '_+', ' '
+
+        $jsonMeta = [ordered]@{
+            timestamp       = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')
+            book            = $cleanBook.Trim()
+            comparison_type = $compType
+            a = [ordered]@{
+                label       = $logA.Type
+                port        = $logA.Port
+                firmware    = if ($fwPartsA.Count -gt 0) { $fwPartsA[0] } else { $logA.FirmwareBranch }
+                branch      = if ($fwPartsA.Count -gt 1) { $fwPartsA[1] } else { "unknown" }
+                log_file    = Split-Path $logA.Path -Leaf
+                epub_path   = $logA.EpubPath
+                epub_folder = $logA.EpubFolder
+            }
+            b = [ordered]@{
+                label       = $logB.Type
+                port        = $logB.Port
+                firmware    = if ($fwPartsB.Count -gt 0) { $fwPartsB[0] } else { $logB.FirmwareBranch }
+                branch      = if ($fwPartsB.Count -gt 1) { $fwPartsB[1] } else { "unknown" }
+                log_file    = Split-Path $logB.Path -Leaf
+                epub_path   = $logB.EpubPath
+                epub_folder = $logB.EpubFolder
+            }
+        }
+
+        $jsonSummary = [ordered]@{
+            total_pages      = $comparison.Count
+            a_wins           = $aWins
+            b_wins           = $bWins
+            ties             = $ties
+            total_time_a_ms  = [int]$totalTimeA
+            total_time_b_ms  = [int]$totalTimeB
+            avg_a_ms         = [Math]::Round($avgA, 1)
+            avg_b_ms         = [Math]::Round($avgB, 1)
+            avg_diff_ms      = [Math]::Round($avgB - $avgA, 1)
+            avg_diff_percent = if ($avgA -gt 0) { [Math]::Round((($avgB - $avgA) / $avgA) * 100, 1) } else { 0 }
+            has_unfair_pages = [bool]($comparison | Where-Object { $_.Winner -like "*[!]*" })
+        }
+
+        $jsonPages = @()
+        foreach ($row in $comparison) {
+            $bareWinner = $row.Winner -replace " \[!\]", ""
+            $isUnfair   = $row.Winner -like "*[!]*"
+
+            $pageObj = [ordered]@{
+                page         = $row.Page
+                a_ms         = [int]$row.$colA
+                b_ms         = [int]$row.$colB
+                a_images     = [int]$row.$imgColA
+                b_images     = [int]$row.$imgColB
+                diff_ms      = [int]$row.Diff_ms
+                diff_percent = [double]($row.Percent -replace '%', '')
+                winner       = $bareWinner
+                unfair       = $isUnfair
+            }
+
+            # Add cover success only for the Cover row
+            $csA = $row.PSObject.Properties["${colA}_CoverSuccess"]
+            $csB = $row.PSObject.Properties["${colB}_CoverSuccess"]
+            if ($null -ne $csA -and $csA.Value -ne $null -and $csA.Value -ne '') {
+                $pageObj.a_cover_success = [bool]$csA.Value
+                $pageObj.b_cover_success = [bool]$csB.Value
+            }
+
+            $jsonPages += $pageObj
+        }
+
+        $jsonOutput = [ordered]@{
+            meta    = $jsonMeta
+            summary = $jsonSummary
+            pages   = $jsonPages
+        }
+
+        $jsonFile = $outputFile -replace '\.csv$', '.json'
+        $jsonOutput | ConvertTo-Json -Depth 5 | Set-Content -Path $jsonFile -Encoding UTF8
+        Write-Host "JSON exported: $jsonFile" -ForegroundColor Green
+
+        # ── Markdown report ──────────────────────────────────────────────────
+        $md = [System.Text.StringBuilder]::new()
+
+        # Header
+        $null = $md.AppendLine("# EPUB Optimization Benchmark Report")
+        $null = $md.AppendLine("")
+
+        # Metadata table
+        $null = $md.AppendLine("## Comparison")
+        $null = $md.AppendLine("")
+        $null = $md.AppendLine("| | Label | Firmware | Branch | Port |")
+        $null = $md.AppendLine("|---|---|---|---|---|")
+        $branchA = if ($fwPartsA.Count -gt 1) { $fwPartsA[1] } else { 'unknown' }
+        $branchB = if ($fwPartsB.Count -gt 1) { $fwPartsB[1] } else { 'unknown' }
+        $null = $md.AppendLine("| **A** | $($logA.Type) | $($fwPartsA[0]) | $branchA | $($logA.Port) |")
+        $null = $md.AppendLine("| **B** | $($logB.Type) | $($fwPartsB[0]) | $branchB | $($logB.Port) |")
+        $null = $md.AppendLine("")
+        $null = $md.AppendLine("**Book:** $($cleanBook.Trim())  ")
+        $null = $md.AppendLine("**Date:** $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  ")
+        $null = $md.AppendLine("**Type:** $compType  ")
+        $null = $md.AppendLine("")
+
+        # Unfair pages warning (if any)
+        $unfairPages = $comparison | Where-Object { $_.Winner -like "*[!]*" }
+        if ($unfairPages) {
+            $null = $md.AppendLine("> [!WARNING]")
+            $null = $md.AppendLine("> Pages marked with [!] have content discrepancies (different image counts or cover generation results).")
+            $null = $md.AppendLine("> - If the **winner** had fewer images/failed cover: result may be **misleading** (did less work)")
+            $null = $md.AppendLine("> - If the **loser** had fewer images/failed cover: result is **conservative** (winner did more work and still won)")
+            $null = $md.AppendLine("")
+        }
+
+        # Render time table
+        $null = $md.AppendLine("## Render Time Comparison")
+        $null = $md.AppendLine("")
+        $null = $md.AppendLine("| Page | A_ms | B_ms | A_img | B_img | Diff_ms | Percent | Winner |")
+        $null = $md.AppendLine("|------|-----:|-----:|------:|------:|--------:|--------:|--------|")
+
+        foreach ($row in $comparison) {
+            $w = $row.Winner -replace " \[!\]", ""
+            $flag = if ($row.Winner -like "*[!]*") { " [!]" } else { "" }
+            $winnerMd = switch ($w) {
+                "TIE" { "TIE" }
+                $winnerA { "**A**$flag" }
+                $winnerB { "**B**$flag" }
+                default { $w }
+            }
+            $imgA = $row.PSObject.Properties[$imgColA]; $imgAv = if ($null -ne $imgA) { $imgA.Value } else { "" }
+            $imgB = $row.PSObject.Properties[$imgColB]; $imgBv = if ($null -ne $imgB) { $imgB.Value } else { "" }
+            $null = $md.AppendLine("| $($row.Page) | $($row.$colA) | $($row.$colB) | $imgAv | $imgBv | $($row.Diff_ms) | $($row.Percent) | $winnerMd |")
+        }
+        $null = $md.AppendLine("")
+
+        # Summary
+        $null = $md.AppendLine("## Summary")
+        $null = $md.AppendLine("")
+        $null = $md.AppendLine("| Metric | Value |")
+        $null = $md.AppendLine("|--------|------:|")
+        $null = $md.AppendLine("| A wins ($($logA.Type)) | $aWins |")
+        $null = $md.AppendLine("| B wins ($($logB.Type)) | $bWins |")
+        $null = $md.AppendLine("| Ties | $ties |")
+        $null = $md.AppendLine("| Total pages analyzed | $($comparison.Count) |")
+        $null = $md.AppendLine("")
+
+        # Total Performance
+        $null = $md.AppendLine("## Performance")
+        $null = $md.AppendLine("")
+        $timeA_s = [Math]::Round($totalTimeA / 1000, 2)
+        $timeB_s = [Math]::Round($totalTimeB / 1000, 2)
+        $null = $md.AppendLine("| Metric | A | B |")
+        $null = $md.AppendLine("|--------|--:|--:|")
+        $null = $md.AppendLine("| Total time | ${timeA_s}s ($totalTimeA ms) | ${timeB_s}s ($totalTimeB ms) |")
+        $null = $md.AppendLine("| Average per page | $([Math]::Round($avgA, 0)) ms | $([Math]::Round($avgB, 0)) ms |")
+        $null = $md.AppendLine("")
+
+        $diffAbs   = [Math]::Abs($totalTimeA - $totalTimeB)
+        $diffS     = [Math]::Round($diffAbs / 1000, 2)
+        $diffPct   = if ($totalTimeA -gt 0) { [Math]::Round(($diffAbs / $totalTimeA) * 100, 1) } else { 0 }
+        $avgDiffAbs = [Math]::Round([Math]::Abs($avgB - $avgA), 1)
+        $avgPctAbs  = [Math]::Round([Math]::Abs(($avgB - $avgA) / $avgA * 100), 1)
+
+        if ($diffPct -gt 1) {
+            if ($totalTimeB -lt $totalTimeA) {
+                $perfLine = "**B is faster overall: saves ${diffS}s ($diffPct%) in total render time**"
+            } else {
+                $perfLine = "**A is faster overall: saves ${diffS}s ($diffPct%) in total render time**"
+            }
+        } else {
+            $perfLine = "**Overall difference is statistically insignificant (< 1%)**"
+        }
+        $null = $md.AppendLine($perfLine)
+        if ($avgPctAbs -gt 1) {
+            if ($avgB -lt $avgA) {
+                $null = $md.AppendLine("  Average per page: B is $avgDiffAbs ms faster ($avgPctAbs%)")
+            } else {
+                $null = $md.AppendLine("  Average per page: A is $avgDiffAbs ms faster ($avgPctAbs%)")
+            }
+        }
+        $null = $md.AppendLine("")
+
+        # Unfair comparisons detail
+        if ($unfairPages) {
+            $null = $md.AppendLine("## Unfair Comparisons Detail")
+            $null = $md.AppendLine("")
+            foreach ($up in $unfairPages) {
+                $upWinner = $up.Winner -replace " \[!\]", ""
+                $upImgA = $up.PSObject.Properties[$imgColA]; $upImgAv = if ($null -ne $upImgA) { [int]$upImgA.Value } else { 0 }
+                $upImgB = $up.PSObject.Properties[$imgColB]; $upImgBv = if ($null -ne $upImgB) { [int]$upImgB.Value } else { 0 }
+                $upCs = $up.PSObject.Properties["${colA}_CoverSuccess"]
+                if ($null -ne $upCs -and $upCs.Value -ne $null -and $upCs.Value -ne '') {
+                    $statusA = if ([bool]$upCs.Value) { "SUCCESS" } else { "FAILED" }
+                    $statusB = if ([bool]$up.PSObject.Properties["${colB}_CoverSuccess"].Value) { "SUCCESS" } else { "FAILED" }
+                    $null = $md.AppendLine("- **Page $($up.Page)**: Cover generation - A: $statusA, B: $statusB | Winner: $upWinner")
+                } else {
+                    $null = $md.AppendLine("- **Page $($up.Page)**: Image count - A: $upImgAv, B: $upImgBv | Winner: $upWinner")
+                    if ($upWinner -eq $winnerA -and $upImgAv -lt $upImgBv) {
+                        $null = $md.AppendLine("  > [!] A won but had fewer images - result may be misleading")
+                    } elseif ($upWinner -eq $winnerB -and $upImgBv -lt $upImgAv) {
+                        $null = $md.AppendLine("  > [!] B won but had fewer images - result may be misleading")
+                    } else {
+                        $null = $md.AppendLine("  > [i] Winner had more images - result is conservative")
+                    }
+                }
+            }
+            $null = $md.AppendLine("")
+        }
+
+        # Footer
+        $null = $md.AppendLine("---")
+        $null = $md.AppendLine("*Generated by EPUB Optimization Benchmark - $($jsonMeta.timestamp)*")
+
+        $mdFile = $outputFile -replace '\.csv$', '.md'
+        $md.ToString() | Set-Content -Path $mdFile -Encoding UTF8
+        Write-Host "MD  exported: $mdFile" -ForegroundColor Green
+    }
+
     # Ask if user wants to see charts (only for 2-log comparisons)
     if ($logsWithTimes.Count -eq 2) {
         Write-Host ""
@@ -2413,14 +2580,8 @@ function Start-AnalyzeLogs {
         $response = Read-Host "Show performance charts? (s/n)"
 
         if ($response -eq "s" -or $response -eq "S") {
-            # Determine display names based on comparison type
-            if ($uniqueTypes -gt 1) {
-                $displayNameA = $logA.Type
-                $displayNameB = $logB.Type
-            } else {
-                $displayNameA = "Device A"
-                $displayNameB = "Device B"
-            }
+            $displayNameA = $shortNameA
+            $displayNameB = $shortNameB
 
             Write-Host ""
             Write-Host "Select chart type:" -ForegroundColor Cyan
