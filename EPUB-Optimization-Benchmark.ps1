@@ -1580,6 +1580,9 @@ function Start-AnalyzeLogs {
 
     $logIndex = 0
     $logMap = @{} # Map index to parsed log
+    $sessionMap = @{} # Map session letter to list of indices (ORIGINAL first)
+    $sessionLetters = 'abcdefghijklmnopqrstuvwxyz'
+    $sessionCounter = 0
 
     foreach ($group in $groupedLogs) {
         # Format timestamp for display
@@ -1601,48 +1604,76 @@ function Start-AnalyzeLogs {
             $formatted = "$dateStr $($timePart.Substring(0,2)):$($timePart.Substring(2,2)):$($timePart.Substring(4,2))"
         }
 
-        Write-Host "  [$formatted]" -ForegroundColor Yellow
+        $sessionLetter = [string]$sessionLetters[$sessionCounter]
+        $sessionCounter++
 
-        foreach ($log in $group.Group) {
+        Write-Host "  [$($sessionLetter.ToUpper())] [$formatted]" -ForegroundColor Yellow
+
+        # Sort logs within session: ORIGINAL first, then OPTIMIZED, then others
+        $typeOrder = @{ 'ORIGINAL' = 0; 'OPTIMIZED' = 1 }
+        $sortedLogs = $group.Group | Sort-Object { if ($typeOrder.ContainsKey($_.Type)) { $typeOrder[$_.Type] } else { 99 } }
+
+        $sessionIndices = @()
+        foreach ($log in $sortedLogs) {
             $logIndex++
             $logMap[$logIndex] = $log
+            $sessionIndices += $logIndex
 
             Write-Host "    [$logIndex] $($log.FileName)" -ForegroundColor White
         }
+        $sessionMap["$sessionLetter"] = $sessionIndices
         Write-Host ""
     }
 
-    # Interactive selection
-    Write-Host "Select logs to compare (comma-separated, e.g.: 1,3 or 1-4):" -ForegroundColor Yellow
-    $selection = Read-Host "Selection"
+    # Interactive selection (retry loop)
+    Write-Host "Select logs to compare:" -ForegroundColor Yellow
+    Write-Host "  - Enter a session letter (e.g.: a or A) to select all logs from that session" -ForegroundColor Gray
+    Write-Host "  - Enter two numbers (e.g.: 1,3) to compare specific logs" -ForegroundColor Gray
+    Write-Host ""
 
-    # Parse selection
     $selectedIndices = @()
-    foreach ($part in $selection -split ',') {
-        if ($part -match '^(\d+)-(\d+)$') {
-            # Range
-            $start = [int]$matches[1]
-            $end = [int]$matches[2]
-            for ($i = $start; $i -le $end; $i++) {
-                if ($logMap.ContainsKey($i)) {
-                    $selectedIndices += $i
+    while ($selectedIndices.Count -lt 2) {
+        $promptLine = [Console]::CursorTop
+        $selection = Read-Host "Selection"
+        $selection = $selection.Trim()
+
+        $selectedIndices = @()
+        $invalid = $false
+
+        if ($selection -match '^[a-zA-Z]$') {
+            if ($sessionMap.ContainsKey($selection.ToLower())) {
+                $selectedIndices = $sessionMap[$selection.ToLower()]
+            } else {
+                $invalid = $true
+            }
+        } else {
+            foreach ($part in $selection -split ',') {
+                $part = $part.Trim()
+                if ($part -match '^(\d+)-(\d+)$') {
+                    $start = [int]$matches[1]
+                    $end = [int]$matches[2]
+                    for ($i = $start; $i -le $end; $i++) {
+                        if ($logMap.ContainsKey($i)) { $selectedIndices += $i }
+                    }
+                } elseif ($part -match '^\d+$') {
+                    $index = [int]$part
+                    if ($logMap.ContainsKey($index)) { $selectedIndices += $index }
                 }
             }
-        } elseif ($part -match '^\d+$') {
-            # Single number
-            $index = [int]$part
-            if ($logMap.ContainsKey($index)) {
-                $selectedIndices += $index
-            }
+            if ($selectedIndices.Count -lt 2) { $invalid = $true }
         }
-    }
 
-    if ($selectedIndices.Count -lt 2) {
-        Write-Host "ERROR: Please select at least 2 logs to compare" -ForegroundColor Red
-        Write-Host ""
-        Write-Host "Press ENTER to return to menu..." -ForegroundColor Gray
-        Read-Host
-        return
+        if ($invalid) {
+            Write-Host "Invalid option. Press ENTER to try again..." -ForegroundColor Red -NoNewline
+            [Console]::ReadKey($true) | Out-Null
+            # Clear the error line and the "Selection: X" line, restore cursor
+            $clearLine = ' ' * [Console]::WindowWidth
+            [Console]::SetCursorPosition(0, [Console]::CursorTop)
+            [Console]::Write($clearLine)
+            [Console]::SetCursorPosition(0, $promptLine)
+            [Console]::Write($clearLine)
+            [Console]::SetCursorPosition(0, $promptLine)
+        }
     }
 
     # Get selected logs
