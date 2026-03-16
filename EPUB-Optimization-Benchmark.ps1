@@ -1729,6 +1729,8 @@ function Start-AnalyzeLogs {
     # Get selected logs
     $selectedLogs = $selectedIndices | ForEach-Object { $logMap[$_] }
 
+    Clear-Host
+    Write-Host "Analyzing selected logs" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Selected logs:" -ForegroundColor Green
     foreach ($log in $selectedLogs) {
@@ -2197,7 +2199,11 @@ function Start-AnalyzeLogs {
             $colWidths[$prop] = $maxLen
         }
 
+        $msCols = @($colA, $colB, "Diff_ms")
+        foreach ($mc in $msCols) { $colWidths[$mc] += 3 }  # account for " ms" suffix
         $rightAlignedCols = @($colA, $colB, $imgColA, $imgColB, "Diff_ms", "Percent")
+
+        $headerDisplay = @{ $colA = "A"; $colB = "B"; "Diff_ms" = "Diff" }
 
         # Print header row
         foreach ($prop in $orderedProperties) {
@@ -2206,7 +2212,8 @@ function Start-AnalyzeLogs {
                      else { "White" }
             $w = $colWidths[$prop]
             $fmt = if ($rightAlignedCols -contains $prop) { "{0,$w}" } else { "{0,-$w}" }
-            Write-Host ($fmt -f $prop) -ForegroundColor $color -NoNewline
+            $hdr = if ($headerDisplay.ContainsKey($prop)) { $headerDisplay[$prop] } else { $prop }
+            Write-Host ($fmt -f $hdr) -ForegroundColor $color -NoNewline
             Write-Host "  " -NoNewline
         }
         Write-Host ""
@@ -2225,6 +2232,7 @@ function Start-AnalyzeLogs {
             foreach ($prop in $orderedProperties) {
                 $pv = $row.PSObject.Properties[$prop]
                 $strVal = if ($null -ne $pv -and $null -ne $pv.Value) { $pv.Value.ToString() } else { "" }
+                if ($msCols -contains $prop -and $strVal -ne "") { $strVal = "${strVal} ms" }
                 $width = $colWidths[$prop]
                 $fmt = if ($rightAlignedCols -contains $prop) { "{0,$width}" } else { "{0,-$width}" }
 
@@ -2791,20 +2799,20 @@ function Start-AnalyzeLogs {
             $pageDisplay = if ($mostImproved.Page -like "Cover*") { if ($mostIsMisleading) { "Cover [!]" } else { "Cover" } } else { "Page $($mostImproved.Page)" }
             if ([Math]::Abs($mostImprovedPercent) -gt 1) {
                 $warningText = if ($mostIsMisleading) { " [!]" } else { "" }
-                Write-WithWarning "  $("Most improved".PadRight($impactLabelW)): $pageDisplay ($displayNameB) is $([Math]::Abs($mostImproved.Diff_ms))ms faster ($($mostImproved.Percent))$warningText" "Green"
+                Write-WithWarning "  $("Most improved".PadRight($impactLabelW)): $pageDisplay ($displayNameB) is $([Math]::Abs($mostImproved.Diff_ms)) ms faster ($($mostImproved.Percent))$warningText" "Green"
             } else {
-                Write-Host "  $("Most improved".PadRight($impactLabelW)): $pageDisplay ($displayNameB) is $([Math]::Abs($mostImproved.Diff_ms))ms faster ($($mostImproved.Percent)) - statistically insignificant" -ForegroundColor Gray
+                Write-Host "  $("Most improved".PadRight($impactLabelW)): $pageDisplay ($displayNameB) is $([Math]::Abs($mostImproved.Diff_ms)) ms faster ($($mostImproved.Percent)) - statistically insignificant" -ForegroundColor Gray
             }
 
             # Worst case for B: regression or least improved
             $pageDisplay = if ($leastImproved.Page -like "Cover*") { if ($leastIsMisleading) { "Cover [!]" } else { "Cover" } } else { "Page $($leastImproved.Page)" }
             if ($gotWorse -and $leastImprovedPercent -gt 1) {
                 $warningText = if ($leastIsMisleading) { " [!]" } else { "" }
-                Write-WithWarning "  $("Regression".PadRight($impactLabelW)): $pageDisplay ($displayNameB) is $($leastImproved.Diff_ms)ms SLOWER ($($leastImproved.Percent))$warningText" "Red"
+                Write-WithWarning "  $("Regression".PadRight($impactLabelW)): $pageDisplay ($displayNameB) is $($leastImproved.Diff_ms) ms SLOWER ($($leastImproved.Percent))$warningText" "Red"
             } elseif ($gotWorse) {
-                Write-Host "  $("Regression".PadRight($impactLabelW)): $pageDisplay ($displayNameB) is $($leastImproved.Diff_ms)ms slower ($($leastImproved.Percent)) - statistically insignificant" -ForegroundColor Gray
+                Write-Host "  $("Regression".PadRight($impactLabelW)): $pageDisplay ($displayNameB) is $($leastImproved.Diff_ms) ms slower ($($leastImproved.Percent)) - statistically insignificant" -ForegroundColor Gray
             } else {
-                Write-Host "  $("Least improved".PadRight($impactLabelW)): $pageDisplay ($displayNameB) is only $([Math]::Abs($leastImproved.Diff_ms))ms faster ($($leastImproved.Percent))" -ForegroundColor Yellow
+                Write-Host "  $("Least improved".PadRight($impactLabelW)): $pageDisplay ($displayNameB) is only $([Math]::Abs($leastImproved.Diff_ms)) ms faster ($($leastImproved.Percent))" -ForegroundColor Yellow
             }
         } else {
             # Same book type: Device comparison
@@ -2823,8 +2831,8 @@ function Start-AnalyzeLogs {
             $bestWarningText = if ($bestCaseHasWarning) { " [!]" } else { "" }
             $worstWarningText = if ($worstCaseHasWarning) { " [!]" } else { "" }
 
-            Write-WithWarning "  Best performer:  Page $($bestCase.Page) ($displayNameA) faster by $($bestCase.Diff_ms)ms ($($bestCase.Percent))$bestWarningText" "Green"
-            Write-WithWarning "  Worst performer: Page $($worstCase.Page) ($displayNameB) faster by $($worstCase.Diff_ms)ms ($($worstCase.Percent))$worstWarningText" $(if ([Math]::Abs($worstCase.Diff_ms) -gt 1000) { "Red" } else { "Yellow" })
+            Write-WithWarning "  Best performer:  Page $($bestCase.Page) ($displayNameA) faster by $($bestCase.Diff_ms) ms ($($bestCase.Percent))$bestWarningText" "Green"
+            Write-WithWarning "  Worst performer: Page $($worstCase.Page) ($displayNameB) faster by $($worstCase.Diff_ms) ms ($($worstCase.Percent))$worstWarningText" $(if ([Math]::Abs($worstCase.Diff_ms) -gt 1000) { "Red" } else { "Yellow" })
 
             # Show warning if any highlighted page has issues
             if ($bestCaseHasWarning -or $worstCaseHasWarning) {
