@@ -16,6 +16,10 @@ if (-not (Test-Path $logsDir)) {
 # Initialize global capture success flag
 $global:CaptureSuccess = $false
 
+# Session port memory for dual device capture (persists within a script run)
+$global:SessionLeftPort = $null
+$global:SessionRightPort = $null
+
 # ============================================================
 # FIRMWARE CACHE SYSTEM
 # ============================================================
@@ -677,7 +681,32 @@ function Start-DualDeviceCapture {
             Write-Host ""
         }
 
-        # STEP 4: Open all ports to monitor for button presses
+        # STEP 4: Identify LEFT/RIGHT devices (reuse session ports if available)
+        $leftPort = $null
+        $rightPort = $null
+        $reusingSession = $false
+
+        if ($global:SessionLeftPort -and $global:SessionRightPort -and
+            $availablePorts -contains $global:SessionLeftPort -and
+            $availablePorts -contains $global:SessionRightPort) {
+
+            Write-Host "  Same devices from previous capture:" -ForegroundColor Cyan
+            Write-Host "    LEFT  ->  $($global:SessionLeftPort)" -ForegroundColor Green
+            Write-Host "    RIGHT ->  $($global:SessionRightPort)" -ForegroundColor Green
+            Write-Host ""
+            Write-Host "  [ENTER] Continue  [R] Re-identify devices: " -ForegroundColor Yellow -NoNewline
+            $reuseChoice = Read-Host
+            if ($reuseChoice -inotmatch "^r") {
+                $leftPort = $global:SessionLeftPort
+                $rightPort = $global:SessionRightPort
+                $reusingSession = $true
+                Write-Host ""
+            }
+        }
+
+        if (-not $reusingSession) {
+
+        # Open all ports to monitor for button presses
         $testPorts = @()
         $portMap = @{}
 
@@ -831,6 +860,12 @@ function Start-DualDeviceCapture {
             Read-Host
             return $false
         }
+
+        # Save identified ports for this session
+        $global:SessionLeftPort = $leftPort
+        $global:SessionRightPort = $rightPort
+
+        } # end if (-not $reusingSession)
 
         Write-Host ""
 
@@ -2938,7 +2973,7 @@ while ($running) {
                 Show-CaptureCompleteMenu
                 $postCapture = Read-Host "Select option"
                 switch ($postCapture) {
-                    "0" { Start-SingleDeviceCapture }
+                    "0" { Start-DualDeviceCapture }
                     "1" { Start-AnalyzeLogs }
                     "2" {
                         # Return to main menu - do nothing, loop continues
