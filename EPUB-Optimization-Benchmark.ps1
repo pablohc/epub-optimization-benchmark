@@ -1658,8 +1658,12 @@ function Start-AnalyzeLogs {
         }
 
         # Sort logs within session: ORIGINAL first, then OPTIMIZED, then others
-        $typeOrder = @{ 'ORIGINAL' = 0; 'OPTIMIZED' = 1 }
-        $sortedLogs = $group.Group | Sort-Object { if ($typeOrder.ContainsKey($_.Type)) { $typeOrder[$_.Type] } else { 99 } }
+        # Use -match to handle type variants like ORIGINAL-10R-ASYNC, OPTIMIZED-10R-ASYNC
+        $sortedLogs = $group.Group | Sort-Object {
+            if ($_.Type -match '^ORIGINAL') { 0 }
+            elseif ($_.Type -match '^OPTIMIZED') { 1 }
+            else { 99 }
+        }
 
         # Check if any pair of logs from this session has a matching analysis output file
         $sessionLogFiles = @($sortedLogs | ForEach-Object { Split-Path $_.Path -Leaf })
@@ -1753,7 +1757,11 @@ function Start-AnalyzeLogs {
     $selectedLogs = $selectedIndices | ForEach-Object { $logMap[$_] }
 
     Clear-Host
-    Write-Host "Analyzing selected logs" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "  ANALYZING SELECTED LOGS" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Selected logs:" -ForegroundColor Green
     foreach ($log in $selectedLogs) {
@@ -2551,9 +2559,8 @@ function Start-AnalyzeLogs {
         Write-Host "Pages".PadLeft($winsNumW) -NoNewline -ForegroundColor DarkGray
         Write-Host " $bV" -ForegroundColor DarkCyan
         Write-Host $winsColSep -ForegroundColor DarkCyan
-        # Colors: OPTIMIZED (B) more wins = green, equal = yellow, less = red
-        $winsColorA = if ($aWins -gt $bWins) { "Green" } elseif ($aWins -eq $bWins) { "Yellow" } else { "Red" }
-        $winsColorB = if ($bWins -gt $aWins) { "Green" } elseif ($bWins -eq $aWins) { "Yellow" } else { "Red" }
+        $winsColorA = if ($aWins -eq 0) { "Green" } else { "Blue" }
+        $winsColorB = if ($bWins -eq 0) { "Red" } else { "Green" }
 
         # Data rows
         foreach ($row in @(
@@ -2795,8 +2802,10 @@ function Start-AnalyzeLogs {
 
         Write-Host ""
         Write-Host "Consistency Analysis:" -ForegroundColor Cyan
-        Write-Host "  $($consistencyNameA.PadRight($cvLabelWidth)): Coef. of Variation = $([Math]::Round($cvA, 1))%" -ForegroundColor $(if ($cvA -lt 20) { "Green" } elseif ($cvA -lt 40) { "Yellow" } else { "Red" })
-        Write-Host "  $($consistencyNameB.PadRight($cvLabelWidth)): Coef. of Variation = $([Math]::Round($cvB, 1))%" -ForegroundColor $(if ($cvB -lt 20) { "Green" } elseif ($cvB -lt 40) { "Yellow" } else { "Red" })
+        $cvColorA = if ($cvA -lt $cvB) { "Green" } elseif ($cvA -eq $cvB) { "Yellow" } else { "Red" }
+        $cvColorB = if ($cvB -lt $cvA) { "Green" } elseif ($cvB -eq $cvA) { "Yellow" } else { "Red" }
+        Write-Host "  $($consistencyNameA.PadRight($cvLabelWidth)): Coef. of Variation = $([Math]::Round($cvA, 1))%" -ForegroundColor $cvColorA
+        Write-Host "  $($consistencyNameB.PadRight($cvLabelWidth)): Coef. of Variation = $([Math]::Round($cvB, 1))%" -ForegroundColor $cvColorB
         Write-Host ""
     }
 
@@ -3016,15 +3025,20 @@ function Start-AnalyzeLogs {
     # Export to CSV
     $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 
-    # Clean book names: remove .epub extension and individual timestamps
-    $cleanBookNames = ($logsWithTimes | ForEach-Object {
-        $name = $_.BookName
-        $name = $name -replace '\.epub(_\d{8}(_\d{6})?)?$', ''
-        $name
-    }) -join '_vs_'
-
-    $sanitizedBookNames = $cleanBookNames -replace '[^\w\-]', '_'
-    $outputFile = Join-Path $logsDir "analysis_${sanitizedBookNames}_${timestamp}.csv"
+    # Build output filename: analysis_LABELA_vs_LABELB_BookName_timestamp
+    if ($logsWithTimes.Count -eq 2) {
+        $labelA = $shortNameA -replace '[^\w\-]', '_'
+        $labelB = $shortNameB -replace '[^\w\-]', '_'
+        $bookName = $logsWithTimes[0].BookName -replace '\.epub(_\d{8}(_\d{6})?)?$', ''
+        $sanitizedBookName = $bookName -replace '[^\w\-]', '_'
+        $outputBase = "analysis_${labelA}_vs_${labelB}_${sanitizedBookName}"
+    } else {
+        $cleanBookNames = ($logsWithTimes | ForEach-Object {
+            $_.BookName -replace '\.epub(_\d{8}(_\d{6})?)?$', ''
+        }) -join '_vs_'
+        $outputBase = "analysis_$($cleanBookNames -replace '[^\w\-]', '_')"
+    }
+    $outputFile = Join-Path $logsDir "${outputBase}_${timestamp}.csv"
 
     $comparison | Export-Csv -Path $outputFile -NoTypeInformation -Encoding UTF8
     Write-Host ""
@@ -3785,15 +3799,22 @@ function Start-AnalyzeLogs {
                 $scaleCVA = if ($cvMax -gt 0) { [int](($cvA / $cvMax) * 30) } else { 0 }
                 $scaleCVB = if ($cvMax -gt 0) { [int](($cvB / $cvMax) * 30) } else { 0 }
 
-                Write-Host "  A [" -NoNewline -ForegroundColor Blue
-                Write-Host ("#" * $scaleCVA) -NoNewline -ForegroundColor $(if ($cvA -lt 20) { "Green" } elseif ($cvA -lt 40) { "Yellow" } else { "Red" })
-                Write-Host (" " * (30 - $scaleCVA)) -NoNewline
-                Write-Host "] $([Math]::Round($cvA, 1))%" -ForegroundColor $(if ($cvA -lt 20) { "Green" } elseif ($cvA -lt 40) { "Yellow" } else { "Red" })
+                $cvChartColorA = if ($cvA -lt $cvB) { "Green" } elseif ($cvA -eq $cvB) { "Yellow" } else { "Red" }
+                $cvChartColorB = if ($cvB -lt $cvA) { "Green" } elseif ($cvB -eq $cvA) { "Yellow" } else { "Red" }
+                $cvLabelW  = [Math]::Max($displayNameA.Length, $displayNameB.Length)
+                $cvStrA    = "$([Math]::Round($cvA, 1))%"
+                $cvStrB    = "$([Math]::Round($cvB, 1))%"
+                $cvNumW    = [Math]::Max($cvStrA.Length, $cvStrB.Length)
 
-                Write-Host "  B [" -NoNewline -ForegroundColor Green
-                Write-Host ("#" * $scaleCVB) -NoNewline -ForegroundColor $(if ($cvB -lt 20) { "Green" } elseif ($cvB -lt 40) { "Yellow" } else { "Red" })
+                Write-Host "  $($displayNameA.PadRight($cvLabelW)) [" -NoNewline -ForegroundColor $cvChartColorA
+                Write-Host ("#" * $scaleCVA) -NoNewline -ForegroundColor $cvChartColorA
+                Write-Host (" " * (30 - $scaleCVA)) -NoNewline
+                Write-Host "] $($cvStrA.PadLeft($cvNumW))" -ForegroundColor $cvChartColorA
+
+                Write-Host "  $($displayNameB.PadRight($cvLabelW)) [" -NoNewline -ForegroundColor $cvChartColorB
+                Write-Host ("#" * $scaleCVB) -NoNewline -ForegroundColor $cvChartColorB
                 Write-Host (" " * (30 - $scaleCVB)) -NoNewline
-                Write-Host "] $([Math]::Round($cvB, 1))%" -ForegroundColor $(if ($cvB -lt 20) { "Green" } elseif ($cvB -lt 40) { "Yellow" } else { "Red" })
+                Write-Host "] $($cvStrB.PadLeft($cvNumW))" -ForegroundColor $cvChartColorB
 
                 # Statistics explanation
                 Write-Host ""
