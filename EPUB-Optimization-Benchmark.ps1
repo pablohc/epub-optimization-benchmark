@@ -1426,6 +1426,29 @@ function Get-ImagesPerPage {
     return $results
 }
 
+# Returns a hashtable of page index (0-based) -> bool indicating if a 0xD4 half refresh
+# occurred during that page's render cycle (between consecutive "Rendered page in" lines).
+function Get-PagesWithHalfRefresh {
+    param($FilePath)
+    $result = @{}
+    if (-not (Test-Path $FilePath)) { return $result }
+    $content = Get-Content $FilePath
+    $pageIndex = 0
+    $prevLine  = 0
+    for ($i = 0; $i -lt $content.Count; $i++) {
+        if ($content[$i] -match "Rendered page in \d+ms") {
+            $hasR = $false
+            for ($j = $prevLine; $j -lt $i; $j++) {
+                if ($content[$j] -match "0xD4") { $hasR = $true; break }
+            }
+            $result[$pageIndex] = $hasR
+            $prevLine = $i + 1
+            $pageIndex++
+        }
+    }
+    return $result
+}
+
 # Maps img_S_I cache keys -> original image filenames by parsing section build events.
 # [ERS] Loading file: ..., index: N  tells us the section index.
 # [EHP] Found image: src=.../FILENAME lines (in order) tell us img_S_0, img_S_1, etc.
@@ -1755,6 +1778,10 @@ function Start-AnalyzeLogs {
         # Build section image map (img_S_I -> original filename)
         $sectionImgMap = Get-SectionImageMap $log.Path
         $log | Add-Member -MemberType NoteProperty -Name "SectionImageMap" -Value $sectionImgMap -Force
+
+        # Detect which pages had a half refresh (0xD4) in their render cycle
+        $halfRefreshPages = Get-PagesWithHalfRefresh $log.Path
+        $log | Add-Member -MemberType NoteProperty -Name "HalfRefreshPages" -Value $halfRefreshPages -Force
         $totalImages = ($images | ForEach-Object { $_.ImageCount } | Measure-Object -Sum).Sum
 
         # Extract cover generation time
@@ -1899,6 +1926,8 @@ function Start-AnalyzeLogs {
             $logB = $logsWithTimes[1]
             $row | Add-Member -MemberType NoteProperty -Name $colA -Value $logA.RenderTimes[$i].Time -Force
             $row | Add-Member -MemberType NoteProperty -Name $colB -Value $logB.RenderTimes[$i].Time -Force
+            $row | Add-Member -MemberType NoteProperty -Name "A_HasRefresh" -Value ($logA.HalfRefreshPages.ContainsKey($i) -and $logA.HalfRefreshPages[$i]) -Force
+            $row | Add-Member -MemberType NoteProperty -Name "B_HasRefresh" -Value ($logB.HalfRefreshPages.ContainsKey($i) -and $logB.HalfRefreshPages[$i]) -Force
         } else {
             foreach ($log in $logsWithTimes) {
                 $colName = "$($log.Port)_$($log.Type)_ms"
@@ -2201,6 +2230,9 @@ function Start-AnalyzeLogs {
 
         $msCols = @($colA, $colB, "Diff_ms")
         foreach ($mc in $msCols) { $colWidths[$mc] += 3 }  # account for " ms" suffix
+        # Account for " [R]" marker (4 chars) if any row has a half refresh
+        if ($comparison | Where-Object { $_.PSObject.Properties["A_HasRefresh"] -and $_.A_HasRefresh }) { $colWidths[$colA] += 4 }
+        if ($comparison | Where-Object { $_.PSObject.Properties["B_HasRefresh"] -and $_.B_HasRefresh }) { $colWidths[$colB] += 4 }
         $rightAlignedCols = @($colA, $colB, $imgColA, $imgColB, "Diff_ms", "Percent")
 
         $headerDisplay = @{ $colA = "A"; $colB = "B"; "Diff_ms" = "Diff" }
@@ -2233,6 +2265,8 @@ function Start-AnalyzeLogs {
                 $pv = $row.PSObject.Properties[$prop]
                 $strVal = if ($null -ne $pv -and $null -ne $pv.Value) { $pv.Value.ToString() } else { "" }
                 if ($msCols -contains $prop -and $strVal -ne "") { $strVal = "${strVal} ms" }
+                $hasR = ($prop -eq $colA -and $row.PSObject.Properties["A_HasRefresh"] -and $row.A_HasRefresh) -or
+                        ($prop -eq $colB -and $row.PSObject.Properties["B_HasRefresh"] -and $row.B_HasRefresh)
                 $width = $colWidths[$prop]
                 $fmt = if ($rightAlignedCols -contains $prop) { "{0,$width}" } else { "{0,-$width}" }
 
@@ -2266,6 +2300,11 @@ function Start-AnalyzeLogs {
                     Write-Host $baseVal -NoNewline -ForegroundColor $color
                     Write-Host $marker -NoNewline -ForegroundColor Yellow
                     if ($pad -gt 0) { Write-Host (" " * $pad) -NoNewline }
+                } elseif ($hasR) {
+                    $marker = "[R] "
+                    $valueFmt = if ($rightAlignedCols -contains $prop) { "{0,$($width - $marker.Length)}" } else { "{0,-$($width - $marker.Length)}" }
+                    Write-Host $marker -NoNewline -ForegroundColor Cyan
+                    Write-Host ($valueFmt -f $strVal) -NoNewline -ForegroundColor $color
                 } else {
                     Write-Host ($fmt -f $strVal) -ForegroundColor $color -NoNewline
                 }
@@ -2300,6 +2339,9 @@ function Start-AnalyzeLogs {
         Write-Host "  - " -NoNewline -ForegroundColor Gray
         Write-Host "[~]" -NoNewline -ForegroundColor Yellow
         Write-Host " : Page offset - same image present in both versions but on different pages" -ForegroundColor Gray
+        Write-Host "  - " -NoNewline -ForegroundColor Gray
+        Write-Host "[R]" -NoNewline -ForegroundColor Cyan
+        Write-Host " : Refresh Display - page includes an e-ink screen refresh cycle (not content rendering time)" -ForegroundColor Gray
         Write-Host ""
 
         # ── Compute all data ─────────────────────────────────────────────────
@@ -2806,9 +2848,11 @@ function Start-AnalyzeLogs {
 
             # Worst case for B: regression or least improved
             $pageDisplay = if ($leastImproved.Page -like "Cover*") { if ($leastIsMisleading) { "Cover [!]" } else { "Cover" } } else { "Page $($leastImproved.Page)" }
+            $regressionHasRefresh = $leastImproved.PSObject.Properties["B_HasRefresh"] -and $leastImproved.B_HasRefresh
             if ($gotWorse -and $leastImprovedPercent -gt 1) {
                 $warningText = if ($leastIsMisleading) { " [!]" } else { "" }
-                Write-WithWarning "  $("Regression".PadRight($impactLabelW)): $pageDisplay ($displayNameB) is $($leastImproved.Diff_ms) ms SLOWER ($($leastImproved.Percent))$warningText" "Red"
+                Write-WithWarning "  $("Regression".PadRight($impactLabelW)): $pageDisplay ($displayNameB) is $($leastImproved.Diff_ms) ms SLOWER ($($leastImproved.Percent))$warningText" "Red" -NoNewline
+                if ($regressionHasRefresh) { Write-Host " [R]" -ForegroundColor Cyan } else { Write-Host "" }
             } elseif ($gotWorse) {
                 Write-Host "  $("Regression".PadRight($impactLabelW)): $pageDisplay ($displayNameB) is $($leastImproved.Diff_ms) ms slower ($($leastImproved.Percent)) - statistically insignificant" -ForegroundColor Gray
             } else {
@@ -3200,7 +3244,8 @@ function Start-AnalyzeLogs {
         $null = $md.AppendLine("B = $shortNameB faster  ")
         $null = $md.AppendLine("TIE = difference < 1% (statistically insignificant)  ")
         $null = $md.AppendLine("[!] = image failure (one version missing an image)  ")
-        $null = $md.AppendLine("[~] = page offset (same image on different page)")
+        $null = $md.AppendLine("[~] = page offset (same image on different page)  ")
+        $null = $md.AppendLine("[R] = Refresh Display (e-ink screen refresh cycle included in page time)")
         $null = $md.AppendLine("")
 
         # Summary
@@ -3529,6 +3574,7 @@ function Start-AnalyzeLogs {
                     Write-Host ("#" * $scaleA) -NoNewline -ForegroundColor Blue
                     Write-Host (" " * (21 - $scaleA)) -NoNewline
                     Write-Host "] " -NoNewline -ForegroundColor Blue
+                    if ($row.PSObject.Properties["A_HasRefresh"] -and $row.A_HasRefresh) { Write-Host "[R] " -NoNewline -ForegroundColor Cyan } else { Write-Host "    " -NoNewline }
                     Write-Host "$($timeA.ToString().PadLeft($msWidthBar))ms" -NoNewline -ForegroundColor Gray
                     Write-Host " | " -NoNewline -ForegroundColor Gray
 
@@ -3537,6 +3583,7 @@ function Start-AnalyzeLogs {
                     Write-Host ("#" * $scaleB) -NoNewline -ForegroundColor Green
                     Write-Host (" " * (21 - $scaleB)) -NoNewline
                     Write-Host "] " -NoNewline -ForegroundColor Green
+                    if ($row.PSObject.Properties["B_HasRefresh"] -and $row.B_HasRefresh) { Write-Host "[R] " -NoNewline -ForegroundColor Cyan } else { Write-Host "    " -NoNewline }
                     Write-Host "$($timeB.ToString().PadLeft($msWidthBar))ms " -NoNewline -ForegroundColor Gray
 
                     # Winner + page marker at end of line
@@ -3621,6 +3668,7 @@ function Start-AnalyzeLogs {
                     Write-Host "*" -NoNewline -ForegroundColor Blue
                     Write-Host (" " * (20 - $scaleA)) -NoNewline
                     Write-Host "]" -NoNewline -ForegroundColor Blue
+                    if ($row.PSObject.Properties["A_HasRefresh"] -and $row.A_HasRefresh) { Write-Host " [R]" -NoNewline -ForegroundColor Cyan } else { Write-Host "    " -NoNewline }
                     Write-Host " $($timeA.ToString().PadLeft($msWidthTrend))ms" -NoNewline -ForegroundColor Gray
                     Write-Host " | " -NoNewline -ForegroundColor Gray
 
@@ -3634,6 +3682,7 @@ function Start-AnalyzeLogs {
                     Write-Host "*" -NoNewline -ForegroundColor Green
                     Write-Host (" " * (20 - $scaleB)) -NoNewline
                     Write-Host "]" -NoNewline -ForegroundColor Green
+                    if ($row.PSObject.Properties["B_HasRefresh"] -and $row.B_HasRefresh) { Write-Host " [R]" -NoNewline -ForegroundColor Cyan } else { Write-Host "    " -NoNewline }
                     if ($lineMarker) {
                         Write-Host " $($timeB.ToString().PadLeft($msWidthTrend))ms" -NoNewline -ForegroundColor Gray
                         Write-Host $lineMarker -ForegroundColor $markerColorTrend
