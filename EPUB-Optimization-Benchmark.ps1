@@ -1518,6 +1518,7 @@ function Get-Percentile {
     return $sorted[$index]
 }
 
+
 function Start-AnalyzeLogs {
     Clear-Host
     Write-Host ""
@@ -1584,6 +1585,26 @@ function Start-AnalyzeLogs {
     $sessionLetters = 'abcdefghijklmnopqrstuvwxyz'
     $sessionCounter = 0
 
+    # Build map of analyzed log-file pairs from existing analysis JSON output files
+    # Key: "logA.txt|logB.txt" (sorted), Value: analysis date string
+    $analyzedLogPairs = @{}
+    $analysisJsonFiles = Get-ChildItem $logsDir -Filter "analysis_*.json" -ErrorAction SilentlyContinue
+    foreach ($jsonFile in $analysisJsonFiles) {
+        try {
+            $jdata = Get-Content $jsonFile.FullName -Raw | ConvertFrom-Json
+            $lfa = $jdata.meta.a.log_file
+            $lfb = $jdata.meta.b.log_file
+            if ($lfa -and $lfb) {
+                $pair = @($lfa, $lfb) | Sort-Object
+                $pairKey = $pair -join '|'
+                if (-not $analyzedLogPairs.ContainsKey($pairKey) -or $jsonFile.LastWriteTime -gt $analyzedLogPairs["${pairKey}_dt"]) {
+                    $analyzedLogPairs[$pairKey] = $jsonFile.LastWriteTime.ToString("yyyy-MM-dd HH:mm")
+                    $analyzedLogPairs["${pairKey}_dt"] = $jsonFile.LastWriteTime
+                }
+            }
+        } catch { }
+    }
+
     foreach ($group in $groupedLogs) {
         # Format timestamp for display
         $timestamp = $group.Name
@@ -1604,14 +1625,34 @@ function Start-AnalyzeLogs {
             $formatted = "$dateStr $($timePart.Substring(0,2)):$($timePart.Substring(2,2)):$($timePart.Substring(4,2))"
         }
 
-        $sessionLetter = [string]$sessionLetters[$sessionCounter]
-        $sessionCounter++
-
-        Write-Host "  [$($sessionLetter.ToUpper())] [$formatted]" -ForegroundColor Yellow
-
         # Sort logs within session: ORIGINAL first, then OPTIMIZED, then others
         $typeOrder = @{ 'ORIGINAL' = 0; 'OPTIMIZED' = 1 }
         $sortedLogs = $group.Group | Sort-Object { if ($typeOrder.ContainsKey($_.Type)) { $typeOrder[$_.Type] } else { 99 } }
+
+        # Check if any pair of logs from this session has a matching analysis output file
+        $sessionLogFiles = @($sortedLogs | ForEach-Object { Split-Path $_.Path -Leaf })
+        $isSessionAnalyzed = $false
+        $sessionAnalyzedAt = ""
+        for ($i = 0; $i -lt $sessionLogFiles.Count - 1; $i++) {
+            for ($j = $i + 1; $j -lt $sessionLogFiles.Count; $j++) {
+                $pair = @($sessionLogFiles[$i], $sessionLogFiles[$j]) | Sort-Object
+                $pairKey = $pair -join '|'
+                if ($analyzedLogPairs.ContainsKey($pairKey)) {
+                    $isSessionAnalyzed = $true
+                    $sessionAnalyzedAt = $analyzedLogPairs[$pairKey]
+                }
+            }
+        }
+
+        $sessionLetter = [string]$sessionLetters[$sessionCounter]
+        $sessionCounter++
+
+        Write-Host "  [$($sessionLetter.ToUpper())] [$formatted]" -ForegroundColor Yellow -NoNewline
+        if ($isSessionAnalyzed) {
+            Write-Host "  [Analyzed $sessionAnalyzedAt]" -ForegroundColor Green
+        } else {
+            Write-Host ""
+        }
 
         $sessionIndices = @()
         foreach ($log in $sortedLogs) {
