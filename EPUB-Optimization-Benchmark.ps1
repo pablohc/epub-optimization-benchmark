@@ -2579,7 +2579,7 @@ function Start-AnalyzeLogs {
 
         # ── Unfair comparison warnings ────────────────────────────────────────
         if ($pagesWithWarnings -or $coverDiscrepancy) {
-            Write-WithWarning "[!] UNFAIR COMPARISONS DETECTED:" "Red"
+            Write-Host "UNFAIR COMPARISONS DETECTED:" -ForegroundColor Red
             if ($coverDiscrepancy) {
                 $covStatusA = if ($covSuccessA -gt 0) { "Success" } else { "Failed" }
                 $covStatusB = if ($covSuccessB -gt 0) { "Success" } else { "Failed" }
@@ -2594,7 +2594,8 @@ function Start-AnalyzeLogs {
 
         # ── Failure and offset details ────────────────────────────────────────
         if ($failureOccs.Count -gt 0) {
-            Write-Host "  Image not rendered in " -NoNewline -ForegroundColor Yellow
+            Write-WithWarning "[!]" "Red" -NoNewline
+            Write-Host " Image not rendered in " -NoNewline -ForegroundColor White
             Write-Host "${shortNameA}" -NoNewline -ForegroundColor Blue
             Write-Host ":" -ForegroundColor Yellow
             $maxBaseW  = ($failureOccs | ForEach-Object { $_.Name.Length }      | Measure-Object -Maximum).Maximum
@@ -2603,7 +2604,7 @@ function Start-AnalyzeLogs {
             $maxOccW   = if ($anyMultiF) { ($failureOccs | Where-Object { $multiBase.ContainsKey($_.Base) } | ForEach-Object { "$($_.OccN)".Length } | Measure-Object -Maximum).Maximum } else { 0 }
             foreach ($f in $failureOccs) {
                 Write-Host "    " -NoNewline
-                Write-Host $f.Name.PadRight($maxBaseW) -NoNewline -ForegroundColor Yellow
+                Write-Host $f.Name.PadRight($maxBaseW) -NoNewline -ForegroundColor Red
                 if ($anyMultiF) {
                     if ($multiBase.ContainsKey($f.Base)) {
                         Write-Host "  #$("$($f.OccN)".PadLeft($maxOccW))" -NoNewline -ForegroundColor Gray
@@ -2611,8 +2612,10 @@ function Start-AnalyzeLogs {
                         Write-Host (" " * (3 + $maxOccW)) -NoNewline
                     }
                 }
-                Write-Host "  $shortNameB page " -NoNewline -ForegroundColor Green
+                Write-Host "  page " -NoNewline -ForegroundColor Green
                 Write-Host "$($f.PageB)".PadLeft($maxPageBW) -NoNewline -ForegroundColor Green
+                Write-Host " in " -NoNewline -ForegroundColor Green
+                Write-Host "$shortNameB" -NoNewline -ForegroundColor Green
                 Write-Host "  ->  not in " -NoNewline -ForegroundColor Red
                 Write-Host $shortNameA -ForegroundColor Blue
             }
@@ -2620,7 +2623,8 @@ function Start-AnalyzeLogs {
         }
 
         if ($failureOccsB.Count -gt 0) {
-            Write-Host "  Image not rendered in " -NoNewline -ForegroundColor Yellow
+            Write-WithWarning "[!]" "Red" -NoNewline
+            Write-Host " Image not rendered in " -NoNewline -ForegroundColor White
             Write-Host "${shortNameB}:" -ForegroundColor Green
             $maxBaseW  = ($failureOccsB | ForEach-Object { $_.Name.Length }      | Measure-Object -Maximum).Maximum
             $maxPageAW = ($failureOccsB | ForEach-Object { "$($_.PageA)".Length }| Measure-Object -Maximum).Maximum
@@ -2628,7 +2632,7 @@ function Start-AnalyzeLogs {
             $maxOccW   = if ($anyMultiF) { ($failureOccsB | Where-Object { $multiBaseB.ContainsKey($_.Base) } | ForEach-Object { "$($_.OccN)".Length } | Measure-Object -Maximum).Maximum } else { 0 }
             foreach ($f in $failureOccsB) {
                 Write-Host "    " -NoNewline
-                Write-Host $f.Name.PadRight($maxBaseW) -NoNewline -ForegroundColor Yellow
+                Write-Host $f.Name.PadRight($maxBaseW) -NoNewline -ForegroundColor Red
                 if ($anyMultiF) {
                     if ($multiBaseB.ContainsKey($f.Base)) {
                         Write-Host "  #$("$($f.OccN)".PadLeft($maxOccW))" -NoNewline -ForegroundColor Gray
@@ -2636,8 +2640,10 @@ function Start-AnalyzeLogs {
                         Write-Host (" " * (3 + $maxOccW)) -NoNewline
                     }
                 }
-                Write-Host "  $shortNameA page " -NoNewline -ForegroundColor Blue
+                Write-Host "  page " -NoNewline -ForegroundColor Blue
                 Write-Host "$($f.PageA)".PadLeft($maxPageAW) -NoNewline -ForegroundColor Blue
+                Write-Host " in " -NoNewline -ForegroundColor Blue
+                Write-Host "$shortNameA" -NoNewline -ForegroundColor Blue
                 Write-Host "  ->  not in " -NoNewline -ForegroundColor Red
                 Write-Host $shortNameB -ForegroundColor Green
             }
@@ -2646,7 +2652,7 @@ function Start-AnalyzeLogs {
 
         if ($offsetOccs.Count -gt 0) {
             Write-Host "[~] " -NoNewline -ForegroundColor Yellow
-            Write-Host "Page offset effects (same content, different page):" -ForegroundColor Gray
+            Write-Host "Page offset effects (same content, different page):" -ForegroundColor White
             $maxBaseW  = ($offsetOccs | ForEach-Object { $_.Name.Length }       | Measure-Object -Maximum).Maximum
             $maxPageBW = ($offsetOccs | ForEach-Object { "$($_.PageB)".Length } | Measure-Object -Maximum).Maximum
             $maxPageAW = ($offsetOccs | ForEach-Object { "$($_.PageA)".Length } | Measure-Object -Maximum).Maximum
@@ -2662,10 +2668,13 @@ function Start-AnalyzeLogs {
                         Write-Host (" " * (3 + $maxOccW)) -NoNewline
                     }
                 }
-                Write-Host "  $shortNameB page " -NoNewline -ForegroundColor Green
-                Write-Host "$($o.PageB)".PadLeft($maxPageBW) -NoNewline -ForegroundColor Cyan
-                Write-Host "  ->  $shortNameA page " -NoNewline -ForegroundColor Blue
-                Write-Host "$($o.PageA)".PadLeft($maxPageAW) -ForegroundColor Cyan
+                Write-Host "  page " -NoNewline -ForegroundColor Green
+                Write-Host "$($o.PageB)".PadLeft($maxPageBW) -NoNewline -ForegroundColor Green
+                Write-Host " in $shortNameB" -NoNewline -ForegroundColor Green
+                Write-Host "  -> " -NoNewline -ForegroundColor Yellow
+                Write-Host " page " -NoNewline -ForegroundColor Blue
+                Write-Host "$($o.PageA)".PadLeft($maxPageAW) -NoNewline -ForegroundColor Blue
+                Write-Host " in $shortNameA" -ForegroundColor Blue
             }
             Write-Host ""
         }
@@ -3119,7 +3128,9 @@ function Start-AnalyzeLogs {
             image_failures_a_count = $failureOccs.Count
             image_failures_b_count = $failureOccsB.Count
             page_offset_count      = $offsetOccs.Count
-            has_unfair_pages     = [bool]($comparison | Where-Object { $_.Winner -like "*[!]*" })
+            has_unfair_pages       = [bool]($comparison | Where-Object { $_.Winner -like "*[!]*" })
+            a_half_refresh_count   = ($comparison | Where-Object { $_.PSObject.Properties["A_HasRefresh"] -and $_.A_HasRefresh }).Count
+            b_half_refresh_count   = ($comparison | Where-Object { $_.PSObject.Properties["B_HasRefresh"] -and $_.B_HasRefresh }).Count
         }
 
         $jsonPages = @()
@@ -3128,15 +3139,17 @@ function Start-AnalyzeLogs {
             $isUnfair   = $row.Winner -like "*[!]*"
 
             $pageObj = [ordered]@{
-                page         = $row.Page
-                a_ms         = [int]$row.$colA
-                b_ms         = [int]$row.$colB
-                a_images     = [int]$row.$imgColA
-                b_images     = [int]$row.$imgColB
-                diff_ms      = [int]$row.Diff_ms
-                diff_percent = [double]($row.Percent -replace '%', '')
-                winner       = $bareWinner
-                unfair       = $isUnfair
+                page          = $row.Page
+                a_ms          = [int]$row.$colA
+                b_ms          = [int]$row.$colB
+                a_images      = [int]$row.$imgColA
+                b_images      = [int]$row.$imgColB
+                diff_ms       = [int]$row.Diff_ms
+                diff_percent  = [double]($row.Percent -replace '%', '')
+                winner        = $bareWinner
+                unfair        = $isUnfair
+                a_half_refresh = [bool]($row.PSObject.Properties["A_HasRefresh"] -and $row.A_HasRefresh)
+                b_half_refresh = [bool]($row.PSObject.Properties["B_HasRefresh"] -and $row.B_HasRefresh)
             }
 
             # Add cover success only for the Cover row
@@ -3234,7 +3247,7 @@ function Start-AnalyzeLogs {
         # Render time table
         $null = $md.AppendLine("## Render Time Comparison")
         $null = $md.AppendLine("")
-        $null = $md.AppendLine("| Page | ${shortNameA}_ms | ${shortNameB}_ms | ${shortNameA}_img | ${shortNameB}_img | Diff_ms | Percent | Winner |")
+        $null = $md.AppendLine("| Page | ${shortNameA} ms | ${shortNameB} ms | ${shortNameA} img | ${shortNameB} img | Diff ms | Percent | Winner |")
         $null = $md.AppendLine("|------|-----:|-----:|------:|------:|--------:|--------:|--------|")
 
         foreach ($row in $comparison) {
@@ -3248,7 +3261,9 @@ function Start-AnalyzeLogs {
             }
             $imgA = $row.PSObject.Properties[$imgColA]; $imgAv = if ($null -ne $imgA) { $imgA.Value } else { "" }
             $imgB = $row.PSObject.Properties[$imgColB]; $imgBv = if ($null -ne $imgB) { $imgB.Value } else { "" }
-            $null = $md.AppendLine("| $($row.Page) | $($row.$colA) | $($row.$colB) | $imgAv | $imgBv | $($row.Diff_ms) | $($row.Percent) | $winnerMd |")
+            $rA = if ($row.PSObject.Properties["A_HasRefresh"] -and $row.A_HasRefresh) { " [R]" } else { "" }
+            $rB = if ($row.PSObject.Properties["B_HasRefresh"] -and $row.B_HasRefresh) { " [R]" } else { "" }
+            $null = $md.AppendLine("| $($row.Page) | $($row.$colA)${rA} | $($row.$colB)${rB} | $imgAv | $imgBv | $($row.Diff_ms) | $($row.Percent) | $winnerMd |")
         }
         $null = $md.AppendLine("")
 
@@ -3445,7 +3460,8 @@ function Start-AnalyzeLogs {
             $leastPct = [double]($leastImproved.Percent -replace '%', '')
             if ($gotWorse -and $leastPct -gt 1) {
                 $leastFlag = if ($leastIsMisleading) { " [!]" } else { "" }
-                $null = $md.AppendLine("- **Regression:** $mdPageLeast - $shortNameB is $($leastImproved.Diff_ms) ms SLOWER ($($leastImproved.Percent))$leastFlag")
+                $mdRegrR = if ($leastImproved.PSObject.Properties["B_HasRefresh"] -and $leastImproved.B_HasRefresh) { " [R]" } else { "" }
+                $null = $md.AppendLine("- **Regression:** $mdPageLeast - $shortNameB is $($leastImproved.Diff_ms) ms SLOWER ($($leastImproved.Percent))${leastFlag}${mdRegrR}")
             } elseif ($gotWorse) {
                 $null = $md.AppendLine("- **Regression:** $mdPageLeast - $shortNameB is $($leastImproved.Diff_ms) ms slower ($($leastImproved.Percent)) *(statistically insignificant)*")
             } else {
