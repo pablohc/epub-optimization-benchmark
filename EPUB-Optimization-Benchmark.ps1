@@ -2982,19 +2982,15 @@ function Start-AnalyzeLogs {
     if ($logsWithTimes.Count -eq 2) {
         Write-Host ""
         Write-Host ""
-        $response = Read-Host "Show performance charts? (s/n)"
+        Write-Host "Press ENTER to Show Performance Charts, or ESC to return to Menu..." -ForegroundColor Gray
+        $key = [Console]::ReadKey($true)
 
-        if ($response -eq "s" -or $response -eq "S") {
+        if ($key.Key -ne [ConsoleKey]::Enter) { return }
+
+        if ($key.Key -eq [ConsoleKey]::Enter) {
             $displayNameA = $shortNameA
             $displayNameB = $shortNameB
-
-            Write-Host ""
-            Write-Host "Select chart type:" -ForegroundColor Cyan
-            Write-Host "  1. Bar chart - Side-by-side comparison of each page's render time" -ForegroundColor White
-            Write-Host "  2. Trend chart - Shows how render times vary across pages (dot plot)" -ForegroundColor White
-            Write-Host "  3. Statistics comparison - Compares Min, Max, Avg, Median, Std Dev, P95" -ForegroundColor White
-            Write-Host "  4. All charts - Shows all visualization types" -ForegroundColor White
-            $chartType = Read-Host "Choose (1-4)"
+            $chartType = "4"
 
             # Shorten names for chart if needed
             $nameA = if ($displayNameA.Length -gt 10) { $displayNameA.Substring(0, 8) + ".." } else { $displayNameA }
@@ -3283,13 +3279,14 @@ function Start-AnalyzeLogs {
                 Write-Host "  Coef. of Variation: Std Dev / Avg (lower = more consistent performance)" -ForegroundColor Gray
                 Write-Host ""
             }
+
+            Write-Host ""
+            Write-Host "Press ESC to return to Menu..." -ForegroundColor Gray
+            do { $exitKey = [Console]::ReadKey($true) } until ($exitKey.Key -eq [ConsoleKey]::Escape)
+            return
         }
     }
 
-    Write-Host ""
-    Write-Host ""
-    Write-Host "Press ENTER to return to menu..." -ForegroundColor Gray
-    Read-Host
 }
 
 # ============================================================
