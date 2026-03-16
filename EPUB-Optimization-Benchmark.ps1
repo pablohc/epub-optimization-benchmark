@@ -1760,8 +1760,9 @@ function Start-AnalyzeLogs {
             # Extract immediate parent folder (e.g. "orig-01-txt-only")
             $epubFolder = ($epubPath -split '/' | Select-Object -Last 2 | Select-Object -First 1).Trim()
         }
-        $log | Add-Member -MemberType NoteProperty -Name "EpubPath"   -Value $epubPath   -Force
-        $log | Add-Member -MemberType NoteProperty -Name "EpubFolder" -Value $epubFolder -Force
+        $log | Add-Member -MemberType NoteProperty -Name "EpubPath"    -Value $epubPath    -Force
+        $log | Add-Member -MemberType NoteProperty -Name "EpubFolder"  -Value $epubFolder  -Force
+        $log | Add-Member -MemberType NoteProperty -Name "TotalImages" -Value $totalImages -Force
 
         $logsWithTimes += $log
 
@@ -2302,7 +2303,7 @@ function Start-AnalyzeLogs {
             elseif ($bareWinner -eq "TIE") { $ties++ }
         }
 
-        Write-Host "Summary:" -ForegroundColor Cyan
+        Write-Host "Render time per page:" -ForegroundColor Cyan
 
         $summaryNameA = $shortNameA
         $summaryNameB = $shortNameB
@@ -2311,9 +2312,13 @@ function Start-AnalyzeLogs {
         $labelWidth = [Math]::Max($summaryNameA.Length, [Math]::Max($summaryNameB.Length, "Ties".Length))
         $numWidth   = [Math]::Max("$aWins".Length, [Math]::Max("$bWins".Length, "$ties".Length))
 
-        Write-Host "  $($summaryNameA.PadRight($labelWidth)): $("$aWins".PadLeft($numWidth)) wins"  -ForegroundColor Green
-        Write-Host "  $($summaryNameB.PadRight($labelWidth)): $("$bWins".PadLeft($numWidth)) wins"  -ForegroundColor Blue
-        Write-Host "  $("Ties".PadRight($labelWidth)): $("$ties".PadLeft($numWidth)) pages" -ForegroundColor Gray
+        $labelFasterA = "$summaryNameA faster"
+        $labelFasterB = "$summaryNameB faster"
+        $labelTies    = "Ties"
+        $labelWidthF  = [Math]::Max($labelFasterA.Length, [Math]::Max($labelFasterB.Length, $labelTies.Length))
+        Write-Host "  $($labelFasterA.PadRight($labelWidthF)): $("$aWins".PadLeft($numWidth))"  -ForegroundColor Green
+        Write-Host "  $($labelFasterB.PadRight($labelWidthF)): $("$bWins".PadLeft($numWidth))"  -ForegroundColor Blue
+        Write-Host "  $($labelTies.PadRight($labelWidthF)): $("$ties".PadLeft($numWidth))"  -ForegroundColor Gray
         Write-Host ""
 
         # Aggregate cover and image counts
@@ -2333,27 +2338,16 @@ function Start-AnalyzeLogs {
             if ([int]$page.$imgColB -gt 0) { $imgSuccessB++ } else { $imgFailedB++ }
         }
 
-        if ($pagesWithWarnings) {
-            Write-WithWarning "[!] UNFAIR COMPARISONS DETECTED:" "Red"
-        }
+        $coverDiscrepancy = ($covSuccessA -ne $covSuccessB) -and (($covSuccessA + $covFailedA) -gt 0)
 
-        $labelW = [Math]::Max("Cover ".Length, "Images".Length)
-        $covStatusA = if ($covSuccessA -gt 0) { "Success" } else { "Failed" }
-        $covStatusB = if ($covSuccessB -gt 0) { "Success" } else { "Failed" }
-        $covLeft  = "  $("Cover".PadRight($labelW)): $shortNameA $covStatusA"
-        $imgLeft  = "  $("Images".PadRight($labelW)): $shortNameA Success: $imgSuccessA, Failed: $imgFailedA"
-        $pipeCol  = [Math]::Max($covLeft.Length, $imgLeft.Length)
-        if (($covSuccessA + $covFailedA) -gt 0) {
-            Write-Host "$($covLeft.PadRight($pipeCol))  |  $shortNameB $covStatusB" -ForegroundColor Yellow
-        }
-        if (($imgSuccessA + $imgFailedA) -gt 0) {
-            Write-Host "$($imgLeft.PadRight($pipeCol))  |  $shortNameB Success: $imgSuccessB, Failed: $imgFailedB" -ForegroundColor Yellow
-        }
-        if ($pagesWithWarnings) {
-            Write-Host "  If the winner failed to generate images or cover, the result may not represent true performance!" -ForegroundColor Red
-        }
-        if ($pagesWithWarnings -or ($covSuccessA + $covFailedA) -gt 0 -or ($imgSuccessA + $imgFailedA) -gt 0) {
-            Write-Host ""
+        if ($pagesWithWarnings -or $coverDiscrepancy) {
+            Write-WithWarning "[!] UNFAIR COMPARISONS DETECTED:" "Red"
+            if ($coverDiscrepancy) {
+                $covStatusA = if ($covSuccessA -gt 0) { "Success" } else { "Failed" }
+                $covStatusB = if ($covSuccessB -gt 0) { "Success" } else { "Failed" }
+                $covLeft = "  Cover: $shortNameA $covStatusA"
+                Write-Host "$($covLeft.PadRight(40))  |  $shortNameB $covStatusB" -ForegroundColor Yellow
+            }
         }
 
         # ── Occurrence-based image failure and offset detection ──────────────
@@ -2363,8 +2357,11 @@ function Start-AnalyzeLogs {
         # - Same page      : no discrepancy
         # - Different pages: page offset [~]
         # - Missing in A   : image failure [!]
-        $failureOccs = @()   # pre-initialize so MD export can always reference them
-        $offsetOccs  = @()
+        $failureOccs  = @()   # images in B missing from A — pre-initialize so MD export can always reference them
+        $failureOccsB = @()   # images in A missing from B
+        $offsetOccs   = @()
+        $multiBase    = @{}   # pre-initialize for MD section
+        $multiBaseB   = @{}   # pre-initialize for MD section
         if ($logA.SectionImageMap -and $logB.SectionImageMap -and
             $logA.ImagesPerPage.Count -gt 0 -and $logB.ImagesPerPage.Count -gt 0) {
 
@@ -2404,19 +2401,31 @@ function Start-AnalyzeLogs {
             $failureOccs = @($failureOccs | Sort-Object PageB, Base)
             $offsetOccs  = @($offsetOccs  | Sort-Object PageB, Base)
 
+            # Reverse check: images in A missing from B
+            foreach ($base in $occA.Keys) {
+                $pagesA = @($occA[$base])
+                $pagesB = if ($occB.ContainsKey($base)) { @($occB[$base]) } else { @() }
+                for ($i = 0; $i -lt $pagesA.Count; $i++) {
+                    if ($i -ge $pagesB.Count) {
+                        $failureOccsB += [PSCustomObject]@{ Base=$base; OccN=($i+1); PageA=$pagesA[$i] }
+                    }
+                }
+            }
+            $failureOccsB = @($failureOccsB | Sort-Object PageA, Base)
+
             # Display failures
             if ($failureOccs.Count -gt 0) {
                 # Bases with >1 occurrence in OPTIMIZED need #N disambiguator
                 $multiBase = @{}
                 foreach ($b in $occB.Keys) { if ($occB[$b].Count -gt 1) { $multiBase[$b] = $true } }
 
-                Write-WithWarning "[!] Image failures detected (not rendered in ${shortNameA}):" "Red"
+                Write-Host "  Image not rendered in ${shortNameA}:" -ForegroundColor Yellow
                 $maxBaseW  = ($failureOccs | ForEach-Object { $_.Base.Length }      | Measure-Object -Maximum).Maximum
                 $maxPageBW = ($failureOccs | ForEach-Object { "$($_.PageB)".Length }| Measure-Object -Maximum).Maximum
                 $anyMultiF = ($failureOccs | Where-Object { $multiBase.ContainsKey($_.Base) }).Count -gt 0
                 $maxOccW   = if ($anyMultiF) { ($failureOccs | Where-Object { $multiBase.ContainsKey($_.Base) } | ForEach-Object { "$($_.OccN)".Length } | Measure-Object -Maximum).Maximum } else { 0 }
                 foreach ($f in $failureOccs) {
-                    Write-Host "  " -NoNewline
+                    Write-Host "    " -NoNewline
                     Write-Host $f.Base.PadRight($maxBaseW) -NoNewline -ForegroundColor Yellow
                     if ($anyMultiF) {
                         if ($multiBase.ContainsKey($f.Base)) {
@@ -2428,6 +2437,33 @@ function Start-AnalyzeLogs {
                     Write-Host "  $shortNameB page " -NoNewline -ForegroundColor Blue
                     Write-Host "$($f.PageB)".PadLeft($maxPageBW) -NoNewline -ForegroundColor Cyan
                     Write-Host "  ->  not in $shortNameA" -ForegroundColor Red
+                }
+                Write-Host ""
+            }
+
+            # Display reverse failures (images in A missing from B)
+            if ($failureOccsB.Count -gt 0) {
+                $multiBaseB = @{}
+                foreach ($b in $occA.Keys) { if ($occA[$b].Count -gt 1) { $multiBaseB[$b] = $true } }
+
+                Write-Host "  Image not rendered in ${shortNameB}:" -ForegroundColor Yellow
+                $maxBaseW  = ($failureOccsB | ForEach-Object { $_.Base.Length }      | Measure-Object -Maximum).Maximum
+                $maxPageAW = ($failureOccsB | ForEach-Object { "$($_.PageA)".Length }| Measure-Object -Maximum).Maximum
+                $anyMultiF = ($failureOccsB | Where-Object { $multiBaseB.ContainsKey($_.Base) }).Count -gt 0
+                $maxOccW   = if ($anyMultiF) { ($failureOccsB | Where-Object { $multiBaseB.ContainsKey($_.Base) } | ForEach-Object { "$($_.OccN)".Length } | Measure-Object -Maximum).Maximum } else { 0 }
+                foreach ($f in $failureOccsB) {
+                    Write-Host "    " -NoNewline
+                    Write-Host $f.Base.PadRight($maxBaseW) -NoNewline -ForegroundColor Yellow
+                    if ($anyMultiF) {
+                        if ($multiBaseB.ContainsKey($f.Base)) {
+                            Write-Host "  #$("$($f.OccN)".PadLeft($maxOccW))" -NoNewline -ForegroundColor Gray
+                        } else {
+                            Write-Host (" " * (3 + $maxOccW)) -NoNewline
+                        }
+                    }
+                    Write-Host "  $shortNameA page " -NoNewline -ForegroundColor Green
+                    Write-Host "$($f.PageA)".PadLeft($maxPageAW) -NoNewline -ForegroundColor Cyan
+                    Write-Host "  ->  not in $shortNameB" -ForegroundColor Red
                 }
                 Write-Host ""
             }
@@ -2458,6 +2494,22 @@ function Start-AnalyzeLogs {
                 }
                 Write-Host ""
             }
+        }
+        if ($pagesWithWarnings -or $coverDiscrepancy) {
+            Write-Host "If the winner failed to generate images or cover, the result may not represent true performance!" -ForegroundColor Red
+            Write-Host ""
+        }
+
+        # Image failure summary (bidirectional)
+        if ($failureOccs.Count -gt 0 -or $failureOccsB.Count -gt 0) {
+            $labelFailA = "Not in $shortNameA"
+            $labelFailB = "Not in $shortNameB"
+            $labelFailW = [Math]::Max($labelFailA.Length, $labelFailB.Length)
+            $numFailW   = [Math]::Max("$($failureOccs.Count)".Length, "$($failureOccsB.Count)".Length)
+            Write-Host "Image failures:" -ForegroundColor Cyan
+            Write-Host "  $($labelFailA.PadRight($labelFailW)): $("$($failureOccs.Count)".PadLeft($numFailW))" -ForegroundColor $(if ($failureOccs.Count -gt 0) { "Red" } else { "Green" })
+            Write-Host "  $($labelFailB.PadRight($labelFailW)): $("$($failureOccsB.Count)".PadLeft($numFailW))" -ForegroundColor $(if ($failureOccsB.Count -gt 0) { "Red" } else { "Green" })
+            Write-Host ""
         }
 
         # Comparative averages
@@ -2683,8 +2735,6 @@ function Start-AnalyzeLogs {
         $displayNameA = $shortNameA
         $displayNameB = $shortNameB
 
-        Write-Host "Total Performance:" -ForegroundColor Cyan
-
         # Calculate label widths for alignment
         $label1 = "Total render time ${displayNameA}"
         $label2 = "Total render time ${displayNameB}"
@@ -2726,31 +2776,70 @@ function Start-AnalyzeLogs {
         $timeA_formatted = "{0}.{1}s" -f $timeA_str.Split('.')[0].PadLeft($maxTimeIntWidth), $timeA_str.Split('.')[1]
         $timeB_formatted = "{0}.{1}s" -f $timeB_str.Split('.')[0].PadLeft($maxTimeIntWidth), $timeB_str.Split('.')[1]
 
-        Write-Host "  $($label1.PadRight($maxLabelWidth)): $($timeA_formatted) ($totalTimeA ms)" -ForegroundColor White
-        Write-Host "  $($label2.PadRight($maxLabelWidth)): $($timeB_formatted) ($totalTimeB ms)" -ForegroundColor White
-
+        # Pre-compute content lines for box sizing
+        $perfLine1 = "$($label1.PadRight($maxLabelWidth)): $($timeA_formatted) ($totalTimeA ms)"
+        $perfLine2 = "$($label2.PadRight($maxLabelWidth)): $($timeB_formatted) ($totalTimeB ms)"
+        $perfLine4 = "$($label4.PadRight($maxLabelWidth)): $totalPages"
+        $perfLine3 = $null; $perfLine3Color = "White"
+        $perfLine3b = $null; $perfLine3bColor = "White"
         if ($totalTimeSaved -ne 0) {
             $percentSaved = if ($totalTimeA -gt 0) { [Math]::Round(([Math]::Abs($totalTimeSaved) / $totalTimeA) * 100, 1) } else { 0 }
-
-            # Format time saved with decimal alignment
             $timeSaved_str = [Math]::Round([Math]::Abs($totalTimeSaved) / 1000, 2).ToString("0.00")
-            $timeSaved_int = $timeSaved_str.Split('.')[0]
-            $timeSaved_dec = $timeSaved_str.Split('.')[1]
-            $timeSaved_formatted = "{0}.{1}s" -f $timeSaved_int.PadLeft($maxTimeIntWidth), $timeSaved_dec
-
-            # Only show "faster" if difference > 1%
+            $timeSaved_formatted = "{0}.{1}s" -f $timeSaved_str.Split('.')[0].PadLeft($maxTimeIntWidth), $timeSaved_str.Split('.')[1]
             if ($percentSaved -gt 1) {
                 $unfairMarker = if ($hasUnfairComparisonInOptimization) { " [!]" } else { "" }
-                if ($totalTimeSaved -lt 0) {
-                    Write-WithWarning "  $($label3.PadRight($maxLabelWidth)): $($timeSaved_formatted) ($percentSaved%) - $displayNameA is faster$unfairMarker" "Green"
-                } else {
-                    Write-WithWarning "  $($label3.PadRight($maxLabelWidth)): $($timeSaved_formatted) ($percentSaved%) - $displayNameB is faster$unfairMarker" "Green"
-                }
+                $perfWinner = if ($totalTimeSaved -lt 0) { $displayNameA } else { $displayNameB }
+                $perfLine3  = "$($label3.PadRight($maxLabelWidth)): $($timeSaved_formatted) ($percentSaved%)"
+                $perfLine3Color = "Green"
+                $perfLine3b = "$(" " * ($maxLabelWidth + 2))  >> $perfWinner is faster$unfairMarker"
+                $perfLine3bColor = "Green"
             } else {
-                Write-Host "  $($label3.PadRight($maxLabelWidth)): $($timeSaved_formatted) ($percentSaved%) - statistically insignificant" -ForegroundColor Gray
+                $perfLine3  = "$($label3.PadRight($maxLabelWidth)): $($timeSaved_formatted) ($percentSaved%)"
+                $perfLine3Color = "Gray"
+                $perfLine3b = "$(" " * ($maxLabelWidth + 2))  statistically insignificant"
+                $perfLine3bColor = "Gray"
             }
         }
-        Write-Host "  $($label4.PadRight($maxLabelWidth)): $totalPages" -ForegroundColor White
+
+        # Box drawing
+        $boxContent = @($perfLine1, $perfLine2, $perfLine4)
+        if ($perfLine3)  { $boxContent += $perfLine3  }
+        if ($perfLine3b) { $boxContent += $perfLine3b }
+        $innerWidth   = ($boxContent | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
+        $bH  = [char]0x2500; $bV  = [char]0x2502
+        $bTL = [char]0x250C; $bTR = [char]0x2510
+        $bBL = [char]0x2514; $bBR = [char]0x2518
+        $bML = [char]0x251C; $bMR = [char]0x2524
+        $hLine        = "$bH" * ($innerWidth + 2)
+        $topBorder    = "  $bTL$hLine$bTR"
+        $midBorder    = "  $bML$hLine$bMR"
+        $bottomBorder = "  $bBL$hLine$bBR"
+
+        Write-Host $topBorder -ForegroundColor DarkCyan
+        Write-Host "  $bV " -NoNewline -ForegroundColor DarkCyan
+        Write-Host "Total Performance".PadRight($innerWidth) -NoNewline -ForegroundColor Cyan
+        Write-Host " $bV" -ForegroundColor DarkCyan
+        Write-Host $midBorder -ForegroundColor DarkCyan
+        Write-Host "  $bV " -NoNewline -ForegroundColor DarkCyan
+        Write-Host $perfLine4.PadRight($innerWidth) -NoNewline -ForegroundColor White
+        Write-Host " $bV" -ForegroundColor DarkCyan
+        Write-Host "  $bV " -NoNewline -ForegroundColor DarkCyan
+        Write-Host $perfLine1.PadRight($innerWidth) -NoNewline -ForegroundColor White
+        Write-Host " $bV" -ForegroundColor DarkCyan
+        Write-Host "  $bV " -NoNewline -ForegroundColor DarkCyan
+        Write-Host $perfLine2.PadRight($innerWidth) -NoNewline -ForegroundColor White
+        Write-Host " $bV" -ForegroundColor DarkCyan
+        if ($perfLine3) {
+            Write-Host "  $bV " -NoNewline -ForegroundColor DarkCyan
+            Write-Host $perfLine3.PadRight($innerWidth) -NoNewline -ForegroundColor $perfLine3Color
+            Write-Host " $bV" -ForegroundColor DarkCyan
+        }
+        if ($perfLine3b) {
+            Write-Host "  $bV " -NoNewline -ForegroundColor DarkCyan
+            Write-Host $perfLine3b.PadRight($innerWidth) -NoNewline -ForegroundColor $perfLine3bColor
+            Write-Host " $bV" -ForegroundColor DarkCyan
+        }
+        Write-Host $bottomBorder -ForegroundColor DarkCyan
         Write-Host ""
 
         # Show warning if there are unfair comparisons
@@ -2784,8 +2873,8 @@ function Start-AnalyzeLogs {
         $fwPartsB = $logB.FirmwareBranch -split '\+', 2
 
         # Determine comparison type string
-        $compType = if ($useAliases) { "custom" }
-                    elseif ($uniquePorts -eq 1 -and $uniqueTypes -eq 1) { "repeatability" }
+        $compType = if ($uniquePorts -eq 1 -and $uniqueTypes -eq 1) { "repeatability" }
+                    elseif ($uniqueTypes -gt 1 -and $uniquePorts -gt 1) { "book_type+device" }
                     elseif ($uniqueTypes -gt 1) { "book_type" }
                     else { "device" }
 
@@ -2795,24 +2884,30 @@ function Start-AnalyzeLogs {
         $jsonMeta = [ordered]@{
             timestamp       = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')
             book            = $cleanBook.Trim()
-            comparison_type = $compType
+            comparison_type = $comparisonType
             a = [ordered]@{
-                label       = $logA.Type
-                port        = $logA.Port
-                firmware    = if ($fwPartsA.Count -gt 0) { $fwPartsA[0] } else { $logA.FirmwareBranch }
-                branch      = if ($fwPartsA.Count -gt 1) { $fwPartsA[1] } else { "unknown" }
-                log_file    = Split-Path $logA.Path -Leaf
-                epub_path   = $logA.EpubPath
-                epub_folder = $logA.EpubFolder
+                label         = $logA.Type
+                port          = $logA.Port
+                firmware      = if ($fwPartsA.Count -gt 0) { $fwPartsA[0] } else { $logA.FirmwareBranch }
+                branch        = if ($fwPartsA.Count -gt 1) { $fwPartsA[1] } else { "unknown" }
+                pages         = $logA.RenderTimes.Count
+                total_images  = $logA.TotalImages
+                cover_success = if ($logA.CoverGenerationTime) { $logA.CoverGenerationTime.Success } else { $null }
+                log_file      = Split-Path $logA.Path -Leaf
+                epub_path     = $logA.EpubPath
+                epub_folder   = $logA.EpubFolder
             }
             b = [ordered]@{
-                label       = $logB.Type
-                port        = $logB.Port
-                firmware    = if ($fwPartsB.Count -gt 0) { $fwPartsB[0] } else { $logB.FirmwareBranch }
-                branch      = if ($fwPartsB.Count -gt 1) { $fwPartsB[1] } else { "unknown" }
-                log_file    = Split-Path $logB.Path -Leaf
-                epub_path   = $logB.EpubPath
-                epub_folder = $logB.EpubFolder
+                label         = $logB.Type
+                port          = $logB.Port
+                firmware      = if ($fwPartsB.Count -gt 0) { $fwPartsB[0] } else { $logB.FirmwareBranch }
+                branch        = if ($fwPartsB.Count -gt 1) { $fwPartsB[1] } else { "unknown" }
+                pages         = $logB.RenderTimes.Count
+                total_images  = $logB.TotalImages
+                cover_success = if ($logB.CoverGenerationTime) { $logB.CoverGenerationTime.Success } else { $null }
+                log_file      = Split-Path $logB.Path -Leaf
+                epub_path     = $logB.EpubPath
+                epub_folder   = $logB.EpubFolder
             }
         }
 
@@ -2827,7 +2922,24 @@ function Start-AnalyzeLogs {
             avg_b_ms         = [Math]::Round($avgB, 1)
             avg_diff_ms      = [Math]::Round($avgB - $avgA, 1)
             avg_diff_percent = if ($avgA -gt 0) { [Math]::Round((($avgB - $avgA) / $avgA) * 100, 1) } else { 0 }
-            has_unfair_pages = [bool]($comparison | Where-Object { $_.Winner -like "*[!]*" })
+            min_a_ms         = [int]$minA
+            max_a_ms         = [int]$maxA
+            median_a_ms      = [int]$medianA
+            stddev_a_ms      = [Math]::Round($stdDevA, 1)
+            p95_a_ms         = [int]$p95A
+            p99_a_ms         = [int]$p99A
+            min_b_ms         = [int]$minB
+            max_b_ms         = [int]$maxB
+            median_b_ms      = [int]$medianB
+            stddev_b_ms      = [Math]::Round($stdDevB, 1)
+            p95_b_ms         = [int]$p95B
+            p99_b_ms         = [int]$p99B
+            cv_a_percent     = [Math]::Round($cvA, 1)
+            cv_b_percent     = [Math]::Round($cvB, 1)
+            image_failures_a_count = $failureOccs.Count
+            image_failures_b_count = $failureOccsB.Count
+            page_offset_count      = $offsetOccs.Count
+            has_unfair_pages     = [bool]($comparison | Where-Object { $_.Winner -like "*[!]*" })
         }
 
         $jsonPages = @()
@@ -2858,9 +2970,46 @@ function Start-AnalyzeLogs {
             $jsonPages += $pageObj
         }
 
+        # Build optimization_impact / performance_highlights for JSON
+        if ($uniqueTypes -gt 1) {
+            $jsonImpact = [ordered]@{
+                type = "optimization"
+                most_improved = [ordered]@{
+                    page       = $mostImproved.Page
+                    diff_ms    = [int]$mostImproved.Diff_ms
+                    percent    = [double]($mostImproved.Percent -replace '%', '')
+                    misleading = $mostIsMisleading
+                }
+                least_improved = [ordered]@{
+                    page          = $leastImproved.Page
+                    diff_ms       = [int]$leastImproved.Diff_ms
+                    percent       = [double]($leastImproved.Percent -replace '%', '')
+                    is_regression = $gotWorse
+                    misleading    = $leastIsMisleading
+                }
+            }
+        } else {
+            $jsonImpact = [ordered]@{
+                type = "performance_highlights"
+                best = [ordered]@{
+                    page        = $bestCase.Page
+                    diff_ms     = [int]$bestCase.Diff_ms
+                    percent     = [double]($bestCase.Percent -replace '%', '')
+                    has_warning = $bestCaseHasWarning
+                }
+                worst = [ordered]@{
+                    page        = $worstCase.Page
+                    diff_ms     = [int]$worstCase.Diff_ms
+                    percent     = [double]($worstCase.Percent -replace '%', '')
+                    has_warning = $worstCaseHasWarning
+                }
+            }
+        }
+
         $jsonOutput = [ordered]@{
             meta    = $jsonMeta
             summary = $jsonSummary
+            impact  = $jsonImpact
             pages   = $jsonPages
         }
 
@@ -2887,7 +3036,7 @@ function Start-AnalyzeLogs {
         $null = $md.AppendLine("")
         $null = $md.AppendLine("**Book:** $($cleanBook.Trim())  ")
         $null = $md.AppendLine("**Date:** $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  ")
-        $null = $md.AppendLine("**Type:** $compType  ")
+        $null = $md.AppendLine("**Type:** $comparisonType  ")
         $null = $md.AppendLine("")
 
         # Unfair pages warning (if any)
@@ -2903,7 +3052,7 @@ function Start-AnalyzeLogs {
         # Render time table
         $null = $md.AppendLine("## Render Time Comparison")
         $null = $md.AppendLine("")
-        $null = $md.AppendLine("| Page | A_ms | B_ms | A_img | B_img | Diff_ms | Percent | Winner |")
+        $null = $md.AppendLine("| Page | ${shortNameA}_ms | ${shortNameB}_ms | ${shortNameA}_img | ${shortNameB}_img | Diff_ms | Percent | Winner |")
         $null = $md.AppendLine("|------|-----:|-----:|------:|------:|--------:|--------:|--------|")
 
         foreach ($row in $comparison) {
@@ -2921,15 +3070,39 @@ function Start-AnalyzeLogs {
         }
         $null = $md.AppendLine("")
 
+        # Legend
+        $null = $md.AppendLine("**Legend:**  ")
+        $null = $md.AppendLine("A = $shortNameA faster  ")
+        $null = $md.AppendLine("B = $shortNameB faster  ")
+        $null = $md.AppendLine("TIE = difference < 1% (statistically insignificant)  ")
+        $null = $md.AppendLine("[!] = image failure (one version missing an image)  ")
+        $null = $md.AppendLine("[~] = page offset (same image on different page)")
+        $null = $md.AppendLine("")
+
         # Summary
         $null = $md.AppendLine("## Summary")
         $null = $md.AppendLine("")
-        $null = $md.AppendLine("| Metric | Value |")
-        $null = $md.AppendLine("|--------|------:|")
-        $null = $md.AppendLine("| A wins ($($logA.Type)) | $aWins |")
-        $null = $md.AppendLine("| B wins ($($logB.Type)) | $bWins |")
-        $null = $md.AppendLine("| Ties | $ties |")
-        $null = $md.AppendLine("| Total pages analyzed | $($comparison.Count) |")
+        $null = $md.AppendLine("| Metric | $shortNameA | $shortNameB |")
+        $null = $md.AppendLine("|--------|------:|------:|")
+        $null = $md.AppendLine("| Pages analyzed | $($logA.RenderTimes.Count) | $($logB.RenderTimes.Count) |")
+        $null = $md.AppendLine("| Total images rendered | $($logA.TotalImages) | $($logB.TotalImages) |")
+        if ($failureOccs.Count -gt 0 -or $failureOccsB.Count -gt 0) {
+            $null = $md.AppendLine("| Image failures | $($failureOccs.Count) | $($failureOccsB.Count) |")
+        }
+        if ($offsetOccs.Count -gt 0) {
+            $null = $md.AppendLine("| Page offset effects | $($offsetOccs.Count) | |")
+        }
+        if (($covSuccessA + $covFailedA) -gt 0) {
+            $mdCovStatA = if ($covSuccessA -gt 0) { "SUCCESS" } else { "FAILED" }
+            $mdCovStatB = if ($covSuccessB -gt 0) { "SUCCESS" } else { "FAILED" }
+            $null = $md.AppendLine("| Cover generation | $mdCovStatA | $mdCovStatB |")
+        }
+        $null = $md.AppendLine("")
+        $null = $md.AppendLine("| Render time per page | Pages |")
+        $null = $md.AppendLine("|----------------------|------:|")
+        $null = $md.AppendLine("| $shortNameA faster | $aWins |")
+        $null = $md.AppendLine("| $shortNameB faster | $bWins |")
+        $null = $md.AppendLine("| Ties (< 1% diff) | $ties |")
         $null = $md.AppendLine("")
 
         # Total Performance
@@ -2937,7 +3110,7 @@ function Start-AnalyzeLogs {
         $null = $md.AppendLine("")
         $timeA_s = [Math]::Round($totalTimeA / 1000, 2)
         $timeB_s = [Math]::Round($totalTimeB / 1000, 2)
-        $null = $md.AppendLine("| Metric | A | B |")
+        $null = $md.AppendLine("| Metric | $shortNameA | $shortNameB |")
         $null = $md.AppendLine("|--------|--:|--:|")
         $null = $md.AppendLine("| Total time | ${timeA_s}s ($totalTimeA ms) | ${timeB_s}s ($totalTimeB ms) |")
         $null = $md.AppendLine("| Average per page | $([Math]::Round($avgA, 0)) ms | $([Math]::Round($avgB, 0)) ms |")
@@ -2951,9 +3124,9 @@ function Start-AnalyzeLogs {
 
         if ($diffPct -gt 1) {
             if ($totalTimeB -lt $totalTimeA) {
-                $perfLine = "**B is faster overall: saves ${diffS}s ($diffPct%) in total render time**"
+                $perfLine = "**$shortNameB is faster overall: saves ${diffS}s ($diffPct%) in total render time**"
             } else {
-                $perfLine = "**A is faster overall: saves ${diffS}s ($diffPct%) in total render time**"
+                $perfLine = "**$shortNameA is faster overall: saves ${diffS}s ($diffPct%) in total render time**"
             }
         } else {
             $perfLine = "**Overall difference is statistically insignificant (< 1%)**"
@@ -2961,12 +3134,70 @@ function Start-AnalyzeLogs {
         $null = $md.AppendLine($perfLine)
         if ($avgPctAbs -gt 1) {
             if ($avgB -lt $avgA) {
-                $null = $md.AppendLine("  Average per page: B is $avgDiffAbs ms faster ($avgPctAbs%)")
+                $null = $md.AppendLine("  Average per page: $shortNameB is $avgDiffAbs ms faster ($avgPctAbs%)")
             } else {
-                $null = $md.AppendLine("  Average per page: A is $avgDiffAbs ms faster ($avgPctAbs%)")
+                $null = $md.AppendLine("  Average per page: $shortNameA is $avgDiffAbs ms faster ($avgPctAbs%)")
             }
         }
         $null = $md.AppendLine("")
+
+        # Extended Statistics
+        $null = $md.AppendLine("## Extended Statistics")
+        $null = $md.AppendLine("")
+        $null = $md.AppendLine("| Metric | $shortNameA | $shortNameB |")
+        $null = $md.AppendLine("|--------|--:|--:|")
+        $null = $md.AppendLine("| Min | $([int]$minA) ms | $([int]$minB) ms |")
+        $null = $md.AppendLine("| Max | $([int]$maxA) ms | $([int]$maxB) ms |")
+        $null = $md.AppendLine("| Avg | $([Math]::Round($avgA, 0)) ms | $([Math]::Round($avgB, 0)) ms |")
+        $null = $md.AppendLine("| Median | $([int]$medianA) ms | $([int]$medianB) ms |")
+        $null = $md.AppendLine("| Std Dev | $([Math]::Round($stdDevA, 0)) ms | $([Math]::Round($stdDevB, 0)) ms |")
+        $null = $md.AppendLine("| P95 | $([int]$p95A) ms | $([int]$p95B) ms |")
+        $null = $md.AppendLine("| P99 | $([int]$p99A) ms | $([int]$p99B) ms |")
+        $null = $md.AppendLine("")
+
+        # Consistency Analysis
+        $null = $md.AppendLine("## Consistency Analysis")
+        $null = $md.AppendLine("")
+        $null = $md.AppendLine("Coefficient of Variation (lower = more consistent):")
+        $null = $md.AppendLine("")
+        $null = $md.AppendLine("| | CV% |")
+        $null = $md.AppendLine("|---|---:|")
+        $null = $md.AppendLine("| $shortNameA | $([Math]::Round($cvA, 1))% |")
+        $null = $md.AppendLine("| $shortNameB | $([Math]::Round($cvB, 1))% |")
+        $null = $md.AppendLine("")
+
+        # Optimization Impact / Performance Highlights
+        if ($uniqueTypes -gt 1) {
+            $null = $md.AppendLine("## Optimization Impact")
+            $null = $md.AppendLine("")
+            $mdPageMost  = if ($mostImproved.Page  -like "Cover*") { if ($mostIsMisleading)  { "Cover [!]" } else { "Cover" } } else { "Page $($mostImproved.Page)" }
+            $mdPageLeast = if ($leastImproved.Page -like "Cover*") { if ($leastIsMisleading) { "Cover [!]" } else { "Cover" } } else { "Page $($leastImproved.Page)" }
+            $mostPct = [Math]::Abs([double]($mostImproved.Percent -replace '%', ''))
+            if ($mostPct -gt 1) {
+                $mostFlag = if ($mostIsMisleading) { " [!]" } else { "" }
+                $null = $md.AppendLine("- **Most improved:** $mdPageMost - $shortNameB is $([Math]::Abs($mostImproved.Diff_ms)) ms faster ($($mostImproved.Percent))$mostFlag")
+            } else {
+                $null = $md.AppendLine("- **Most improved:** $mdPageMost - $shortNameB is $([Math]::Abs($mostImproved.Diff_ms)) ms faster ($($mostImproved.Percent)) *(statistically insignificant)*")
+            }
+            $leastPct = [double]($leastImproved.Percent -replace '%', '')
+            if ($gotWorse -and $leastPct -gt 1) {
+                $leastFlag = if ($leastIsMisleading) { " [!]" } else { "" }
+                $null = $md.AppendLine("- **Regression:** $mdPageLeast - $shortNameB is $($leastImproved.Diff_ms) ms SLOWER ($($leastImproved.Percent))$leastFlag")
+            } elseif ($gotWorse) {
+                $null = $md.AppendLine("- **Regression:** $mdPageLeast - $shortNameB is $($leastImproved.Diff_ms) ms slower ($($leastImproved.Percent)) *(statistically insignificant)*")
+            } else {
+                $null = $md.AppendLine("- **Least improved:** $mdPageLeast - $shortNameB is only $([Math]::Abs($leastImproved.Diff_ms)) ms faster ($($leastImproved.Percent))")
+            }
+            $null = $md.AppendLine("")
+        } else {
+            $null = $md.AppendLine("## Performance Highlights")
+            $null = $md.AppendLine("")
+            $bestFlag  = if ($bestCaseHasWarning)  { " [!]" } else { "" }
+            $worstFlag = if ($worstCaseHasWarning) { " [!]" } else { "" }
+            $null = $md.AppendLine("- **Best performer:** Page $($bestCase.Page) - $shortNameA is $($bestCase.Diff_ms) ms faster ($($bestCase.Percent))$bestFlag")
+            $null = $md.AppendLine("- **Worst performer:** Page $($worstCase.Page) - $shortNameB is $([Math]::Abs($worstCase.Diff_ms)) ms faster ($($worstCase.Percent))$worstFlag")
+            $null = $md.AppendLine("")
+        }
 
         # Unfair comparisons detail
         if ($unfairPages) {
@@ -2977,18 +3208,27 @@ function Start-AnalyzeLogs {
                 $upImgA = $up.PSObject.Properties[$imgColA]; $upImgAv = if ($null -ne $upImgA) { [int]$upImgA.Value } else { 0 }
                 $upImgB = $up.PSObject.Properties[$imgColB]; $upImgBv = if ($null -ne $upImgB) { [int]$upImgB.Value } else { 0 }
                 $upCs = $up.PSObject.Properties["${colA}_CoverSuccess"]
+                $upWinnerDisplay = if ($upWinner -eq $winnerA) { $shortNameA } elseif ($upWinner -eq $winnerB) { $shortNameB } else { $upWinner }
                 if ($null -ne $upCs -and $upCs.Value -ne $null -and $upCs.Value -ne '') {
                     $statusA = if ([bool]$upCs.Value) { "SUCCESS" } else { "FAILED" }
                     $statusB = if ([bool]$up.PSObject.Properties["${colB}_CoverSuccess"].Value) { "SUCCESS" } else { "FAILED" }
-                    $null = $md.AppendLine("- **Page $($up.Page)**: Cover generation - A: $statusA, B: $statusB | Winner: $upWinner")
-                } else {
-                    $null = $md.AppendLine("- **Page $($up.Page)**: Image count - A: $upImgAv, B: $upImgBv | Winner: $upWinner")
-                    if ($upWinner -eq $winnerA -and $upImgAv -lt $upImgBv) {
-                        $null = $md.AppendLine("  > [!] A won but had fewer images - result may be misleading")
-                    } elseif ($upWinner -eq $winnerB -and $upImgBv -lt $upImgAv) {
-                        $null = $md.AppendLine("  > [!] B won but had fewer images - result may be misleading")
+                    $null = $md.AppendLine("- **Cover [!]**: $upWinnerDisplay faster - cover generation ${shortNameA}: $statusA, ${shortNameB}: $statusB")
+                    if (($upWinner -eq $winnerA -and $statusA -eq "FAILED") -or ($upWinner -eq $winnerB -and $statusB -eq "FAILED")) {
+                        $null = $md.AppendLine("  > [!] Unfair advantage: winner failed to generate the cover - missing work may explain the speed difference")
                     } else {
-                        $null = $md.AppendLine("  > [i] Winner had more images - result is conservative")
+                        $null = $md.AppendLine("  > [i] Winner generated the cover successfully - result is conservative")
+                    }
+                } else {
+                    $upLoserDisplay = if ($upWinner -eq $winnerA) { $shortNameB } else { $shortNameA }
+                    $upWinnerImgs   = if ($upWinner -eq $winnerA) { $upImgAv } else { $upImgBv }
+                    $upLoserImgs    = if ($upWinner -eq $winnerA) { $upImgBv } else { $upImgAv }
+                    $null = $md.AppendLine("- **Page $($up.Page)**: $upWinnerDisplay faster ($upWinnerImgs images rendered) vs $upLoserDisplay ($upLoserImgs images rendered)")
+                    if ($upWinner -eq $winnerA -and $upImgAv -lt $upImgBv) {
+                        $null = $md.AppendLine("  > [!] Unfair advantage: $shortNameA did less work - missing image may explain the speed difference")
+                    } elseif ($upWinner -eq $winnerB -and $upImgBv -lt $upImgAv) {
+                        $null = $md.AppendLine("  > [!] Unfair advantage: $shortNameB did less work - missing image may explain the speed difference")
+                    } else {
+                        $null = $md.AppendLine("  > [i] Winner rendered more images and still won - result is conservative")
                     }
                 }
             }
@@ -2996,24 +3236,54 @@ function Start-AnalyzeLogs {
         }
 
         # Image failures and page offsets (occurrence-based)
-        if ($failureOccs.Count -gt 0) {
+        if ($failureOccs.Count -gt 0 -or $failureOccsB.Count -gt 0) {
             $anyMultiFmd = ($failureOccs | Where-Object { $multiBase.ContainsKey($_.Base) }).Count -gt 0
-            $null = $md.AppendLine("## Image Failures")
+            $null = $md.AppendLine("## Image Failures in $shortNameA")
             $null = $md.AppendLine("")
-            $null = $md.AppendLine("Images rendered in **$shortNameB** but absent from **$shortNameA**:")
-            $null = $md.AppendLine("")
-            if ($anyMultiFmd) {
-                $null = $md.AppendLine("| Image | # | $shortNameB page | |")
-                $null = $md.AppendLine("|-------|:-:|:---:|---|")
-                foreach ($f in $failureOccs) {
-                    $occLabel = if ($multiBase.ContainsKey($f.Base)) { "#$($f.OccN)" } else { "" }
-                    $null = $md.AppendLine("| $($f.Base) | $occLabel | $($f.PageB) | → not in $shortNameA |")
-                }
+            if ($failureOccs.Count -eq 0) {
+                $null = $md.AppendLine("No images missing from **$shortNameA** - all images from **$shortNameB** were rendered.")
             } else {
-                $null = $md.AppendLine("| Image | $shortNameB page | |")
-                $null = $md.AppendLine("|-------|:---:|---|")
-                foreach ($f in $failureOccs) {
-                    $null = $md.AppendLine("| $($f.Base) | $($f.PageB) | → not in $shortNameA |")
+                $null = $md.AppendLine("Images rendered in **$shortNameB** but absent from **$shortNameA**:")
+                $null = $md.AppendLine("")
+                if ($anyMultiFmd) {
+                    $null = $md.AppendLine("| Image | # | $shortNameB page | |")
+                    $null = $md.AppendLine("|-------|:-:|:---:|---|")
+                    foreach ($f in $failureOccs) {
+                        $occLabel = if ($multiBase.ContainsKey($f.Base)) { "#$($f.OccN)" } else { "" }
+                        $null = $md.AppendLine("| $($f.Base) | $occLabel | $($f.PageB) | -> not in $shortNameA |")
+                    }
+                } else {
+                    $null = $md.AppendLine("| Image | $shortNameB page | |")
+                    $null = $md.AppendLine("|-------|:---:|---|")
+                    foreach ($f in $failureOccs) {
+                        $null = $md.AppendLine("| $($f.Base) | $($f.PageB) | -> not in $shortNameA |")
+                    }
+                }
+            }
+            $null = $md.AppendLine("")
+        }
+        if ($failureOccsB.Count -gt 0 -or $failureOccs.Count -gt 0) {
+            $anyMultiFmdB = ($failureOccsB | Where-Object { $multiBaseB.ContainsKey($_.Base) }).Count -gt 0
+            $null = $md.AppendLine("## Image Failures in $shortNameB")
+            $null = $md.AppendLine("")
+            if ($failureOccsB.Count -eq 0) {
+                $null = $md.AppendLine("No images missing from **$shortNameB** - all images from **$shortNameA** were rendered.")
+            } else {
+                $null = $md.AppendLine("Images rendered in **$shortNameA** but absent from **$shortNameB**:")
+                $null = $md.AppendLine("")
+                if ($anyMultiFmdB) {
+                    $null = $md.AppendLine("| Image | # | $shortNameA page | |")
+                    $null = $md.AppendLine("|-------|:-:|:---:|---|")
+                    foreach ($f in $failureOccsB) {
+                        $occLabel = if ($multiBaseB.ContainsKey($f.Base)) { "#$($f.OccN)" } else { "" }
+                        $null = $md.AppendLine("| $($f.Base) | $occLabel | $($f.PageA) | -> not in $shortNameB |")
+                    }
+                } else {
+                    $null = $md.AppendLine("| Image | $shortNameA page | |")
+                    $null = $md.AppendLine("|-------|:---:|---|")
+                    foreach ($f in $failureOccsB) {
+                        $null = $md.AppendLine("| $($f.Base) | $($f.PageA) | -> not in $shortNameB |")
+                    }
                 }
             }
             $null = $md.AppendLine("")
@@ -3029,13 +3299,13 @@ function Start-AnalyzeLogs {
                 $null = $md.AppendLine("|-------|:-:|:---:|:---:|:---:|")
                 foreach ($o in $offsetOccs) {
                     $occLabel = if ($multiBase.ContainsKey($o.Base)) { "#$($o.OccN)" } else { "" }
-                    $null = $md.AppendLine("| $($o.Base) | $occLabel | $($o.PageB) | → | $($o.PageA) |")
+                    $null = $md.AppendLine("| $($o.Base) | $occLabel | $($o.PageB) | -> | $($o.PageA) |")
                 }
             } else {
                 $null = $md.AppendLine("| Image | $shortNameB page | | $shortNameA page |")
                 $null = $md.AppendLine("|-------|:---:|:---:|:---:|")
                 foreach ($o in $offsetOccs) {
-                    $null = $md.AppendLine("| $($o.Base) | $($o.PageB) | → | $($o.PageA) |")
+                    $null = $md.AppendLine("| $($o.Base) | $($o.PageB) | -> | $($o.PageA) |")
                 }
             }
             $null = $md.AppendLine("")
