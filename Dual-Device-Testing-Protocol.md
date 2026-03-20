@@ -66,7 +66,7 @@ Terminal 2: pio device monitor -p COM4
 
 **Option 3: PowerShell Scripts (Recommended)**
 ```
-.\Capture-Dual-Simple.ps1
+.\EPUB-Optimization-Benchmark.ps1
 ```
 
 ### 1.4 Physical Setup

@@ -1,123 +1,192 @@
-# EPUB Optimization Benchmark - Quick Start Guide
+# EPUB Optimization Benchmark — Usage Guide
 
-## Overview
-This toolkit allows you to capture and analyze performance logs from e-book reader devices to compare ORIGINAL vs OPTIMIZED EPUB files.
-
-## Scripts Available
-
-### 1. Capture Scripts
-
-#### **Capture-Dual-Devices.ps1**
-Capture logs from TWO devices simultaneously.
-- **Use case:** Direct comparison between two devices
-- **Example:** Compare Device A (ORIGINAL) vs Device B (OPTIMIZED)
-- **Output:** Two log files with book names in filenames
+## Running the Main Script
 
 ```powershell
-.\Capture-Dual-Devices.ps1
-# Interactive prompts will ask for book names on each device
+.\EPUB-Optimization-Benchmark.ps1
 ```
 
-#### **Capture-Single-Device.ps1**
-Capture logs from ONE device at a time.
-- **Use case:** Sequential testing or single device analysis
-- **Example:** Test one device now, another device later
-- **Output:** Single log file with book name in filename
+Optional parameters:
 
-```powershell
-.\Capture-Single-Device.ps1 -ComPort "COM3"
-# Interactive prompt will ask for book name
+| Parameter | Effect |
+|-----------|--------|
+| `-DebugMode` | Print all received serial bytes to console during capture |
+| `-SkipReset` | Do not reset the device before capture starts |
+
+---
+
+## Main Menu
+
+```
+[1] Capture - Single Device
+[2] Capture - Dual Devices
+[3] Analyze Logs
+[0] Exit
 ```
 
-### 2. Analysis Script
+---
 
-#### **Analyze-Logs-Specific.ps1**
-Analyze captured logs and generate performance comparisons.
+## Workflow A: Dual Device Capture (Recommended)
 
-```powershell
-.\Analyze-Logs-Specific.ps1
-# Automatically detects books or asks interactively
+Best for ORIGINAL vs OPTIMIZED comparisons. Both devices capture simultaneously, eliminating
+timing variables between sessions.
+
+**Steps:**
+
+1. Select `[2] Capture - Dual Devices`
+2. Select the COM port for the LEFT device (e.g. COM3)
+3. Select the COM port for the RIGHT device (e.g. COM4)
+4. Choose the book type for each device:
+   - `[1] ORIGINAL` — non-optimized EPUB
+   - `[2] OPTIMIZED` — optimized EPUB
+   - `[3] Custom` — any label (e.g. a firmware variant name)
+5. The script resets both devices and starts capturing
+6. Open the same book on both devices and navigate through pages simultaneously
+7. Press `Ctrl+C` to stop capture
+8. Analysis runs automatically and exports JSON, CSV, and Markdown to `logs/`
+
+The script remembers selected ports and book types within the same session.
+
+---
+
+## Workflow B: Single Device Capture
+
+For sequential testing or when only one device is available.
+
+**Steps:**
+
+1. Select `[1] Capture - Single Device`
+2. Select the COM port
+3. Choose the book type (`ORIGINAL`, `OPTIMIZED`, or custom)
+4. Navigate through pages on the device
+5. Press `Ctrl+C` to stop
+6. Repeat for the second device/version
+7. Use `[3] Analyze Logs` to compare the two captures
+
+---
+
+## Workflow C: Analyze Existing Logs
+
+Select `[3] Analyze Logs` to analyze previously captured log files.
+
+The script groups logs by session (same timestamp) and lists them with letter labels.
+
+**Selection options:**
+
+| Input | Effect |
+|-------|--------|
+| Session letter (e.g. `a`) | Select all logs from that session |
+| Two numbers (e.g. `1,3`) | Compare two specific log files |
+| `ALL` | Batch-analyze all valid sessions (export only, no display) |
+
+After selecting logs, choose a chart type:
+
+```
+[1] Bar Chart       — page render times comparison
+[2] Trend Chart     — render times over time
+[3] Statistics Chart — performance metrics comparison
+[4] All Charts
 ```
 
-## Typical Workflows
+---
 
-### Workflow 1: Dual Device Testing (Recommended)
-```
-1. Run Capture-Dual-Devices.ps1
-   - Specify ORIGINAL for Device A
-   - Specify OPTIMIZED for Device B
-   - Start capturing, open books on both devices
-   - Stop capture when done
+## Book Type Options
 
-2. Run Analyze-Logs-Specific.ps1
-   - Automatically detects book names from metadata
-   - Shows comprehensive performance comparison
-   - Generates CSV and charts
-```
+| Option | Label | Use for |
+|--------|-------|---------|
+| `1` | `ORIGINAL` | Non-optimized EPUB |
+| `2` | `OPTIMIZED` | Optimized EPUB |
+| `3` | Custom | Any other variant (firmware A/B, different encoder settings, etc.) |
 
-### Workflow 2: Sequential Single Device Testing
-```
-1. Run Capture-Single-Device.ps1 -ComPort "COM3"
-   - Specify ORIGINAL
-   - Capture first device
-
-2. Run Capture-Single-Device.ps1 -ComPort "COM4"
-   - Specify OPTIMIZED
-   - Capture second device
-
-3. Run Analyze-Logs-Specific.ps1
-   - Select the two log files manually if needed
-   - Get comparison results
-```
-
-### Workflow 3: Device Validation
-```
-1. Run Capture-Dual-Devices.ps1
-   - Specify ORIGINAL for BOTH devices
-   - Test if both devices perform equally
-
-2. Run Analyze-Logs-Specific.ps1
-   - Shows "Device Performance Comparison"
-   - Validates device consistency
-```
+---
 
 ## File Naming Convention
 
-**New format (with metadata):**
-```
-com3_ORIGINAL_20260312_234500.txt
-com4_OPTIMIZED_20260312_234500.txt
-```
+Captured log files follow this pattern:
 
-**Old format (still supported):**
 ```
-com3_A_20260312_234500.txt
-com4_B_20260312_234500.txt
+COM{port}_{TYPE}_{BOOKNAME}_{timestamp}.txt
 ```
 
-## Book Name Options
+Example:
+```
+COM3_ORIGINAL_My_Book_Title.epub_20260320_143022.txt
+COM4_OPTIMIZED_My_Book_Title.epub_20260320_143022.txt
+```
 
-During capture, you can specify:
-- **ORIGINAL** - Non-optimized EPUB
-- **OPTIMIZED** - Optimized EPUB
-- **Custom name** - Any other name (e.g., "TEST_V1", "EXPERIMENTAL")
+Analysis output files share the same timestamp:
+```
+analysis_ORIGINAL_vs_OPTIMIZED_My_Book_Title_20260320_143022.json
+analysis_ORIGINAL_vs_OPTIMIZED_My_Book_Title_20260320_143022.csv
+analysis_ORIGINAL_vs_OPTIMIZED_My_Book_Title_20260320_143022.md
+```
 
-## Analysis Features
+---
 
-The analysis script provides:
-- **Automatic detection** of book names from metadata
-- **Interactive fallback** if books can't be detected
-- **Extended statistics**: Min, Max, Median, Std Dev, P95, P99
-- **Consistency analysis**: Coefficient of Variation
-- **Performance highlights**: Best/worst cases
-- **Optimization impact**: Detects regressions
-- **Visual charts**: Bar charts and trend lines
-- **CSV export**: For further analysis
+## Page Markers in Analysis Output
 
-## Tips
+| Marker | Meaning |
+|--------|---------|
+| `[X]` | JPEG decode failure on that page |
+| `[!]` | Image count discrepancy or cover generation mismatch between versions |
+| `[-]` | Progressive JPEG detected (may indicate lower quality) |
+| `[~]` | Page offset effect (e-ink display artifact) |
+| `[R]` | E-ink half-refresh cycle detected |
 
-1. **Always specify the correct book name** during capture for accurate analysis
-2. **Use dual capture** when possible for more consistent results
-3. **Capture 20-30 pages** minimum for meaningful statistics
-4. **Same book on both devices** validates device performance
-5. **Different books** measures optimization effectiveness
+Pages marked `[X]` or `[!]` indicate an unfair comparison — the two versions did not perform
+the same work, so timing differences should be interpreted with caution.
+
+---
+
+## Statistical Analysis (Multi-Session)
+
+After accumulating multiple ORIGINAL vs OPTIMIZED sessions, run a cross-session statistical
+analysis to validate results with confidence intervals and significance tests.
+
+```powershell
+py statistical_analysis.py
+```
+
+Or double-click `run_analysis.bat`.
+
+The script reads all `analysis_ORIGINAL_vs_OPTIMIZED_*.json` files from `logs/` and produces:
+
+- Per-category page analysis with paired t-test and 95% CI
+- Per-book summary with total time saved and composition breakdown
+- Global savings breakdown by content type
+- Cover impact analysis for text-heavy books
+
+Output files: `logs/statistical_pages.csv`, `logs/statistical_books.csv`
+
+See [STATISTICAL_TESTING_PLAN.md](STATISTICAL_TESTING_PLAN.md) for methodology details.
+
+---
+
+## Firmware Cache
+
+On first connection, the script queries each device for its firmware version and branch.
+Results are cached in `logs/firmware_cache/firmware_COM{port}.json` (1-hour expiry) to avoid
+repeated detection delays in subsequent sessions.
+
+The cache is managed automatically — no manual action required.
+
+---
+
+## Troubleshooting
+
+**Devices not detected**
+- Check USB connections and drivers
+- Open Device Manager (`devmgmt.msc`) → Ports (COM & LPT)
+
+**No data captured**
+- Verify debug logging is enabled in firmware
+- Confirm baud rate is 115200
+- Ensure devices are powered on before capture starts
+
+**"Port in use" error**
+- Close any other application using that COM port (Arduino IDE, PlatformIO monitor, etc.)
+- Restart the PowerShell session
+
+**Analysis shows no pages**
+- Verify the log file contains `Rendered page in Xms` entries
+- Check that both log files have the same book name in their metadata
