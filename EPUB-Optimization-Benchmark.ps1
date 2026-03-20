@@ -1203,12 +1203,13 @@ function Get-CoverGenerationTime {
             $durationSec = [Math]::Round($durationMs / 1000, 2)
 
             $result = [PSCustomObject]@{
-                StartTime = $startTime
-                EndTime = $endTime
-                DurationMs = $durationMs
+                StartTime   = $startTime
+                EndTime     = $endTime
+                DurationMs  = $durationMs
                 DurationSec = $durationSec
-                Success = $true
-                Found = $true
+                Success     = $true
+                Found       = $true
+                FailureType = $null
             }
 
             return $result
@@ -1219,13 +1220,20 @@ function Get-CoverGenerationTime {
             $durationMs = $endTime - $startTime
             $durationSec = [Math]::Round($durationMs / 1000, 2)
 
+            # Determine WHY cover generation failed:
+            # - "decode"  : file was found and decompressed, but JPEG decode init failed
+            # - "missing" : no decode attempt found (file could not be opened/located)
+            $hasDecodeError = $content | Select-String -Pattern "\[ERR\]\s+\[JPG\]\s+JPEG decode init failed" | Select-Object -First 1
+            $failureType = if ($hasDecodeError) { "decode" } else { "missing" }
+
             $result = [PSCustomObject]@{
-                StartTime = $startTime
-                EndTime = $endTime
-                DurationMs = $durationMs
+                StartTime   = $startTime
+                EndTime     = $endTime
+                DurationMs  = $durationMs
                 DurationSec = $durationSec
-                Success = $false
-                Found = $true
+                Success     = $false
+                Found       = $true
+                FailureType = $failureType
             }
 
             return $result
@@ -1386,6 +1394,17 @@ function Get-ImagesPerPage {
         }
     }
 
+    # Find all image decode failure entries
+    $decodeFailures = @()
+    for ($i = 0; $i -lt $content.Count; $i++) {
+        if ($content[$i] -match "\[(\d+)\].*\[IMG\] Failed to decode image: .+/(img_\d+_\d+)\.\w+") {
+            $decodeFailures += [PSCustomObject]@{
+                Timestamp = [int]$matches[1]
+                ImgKey    = $matches[2]
+            }
+        }
+    }
+
     $results = @()
 
     # For each rendered page, count images decoded BEFORE that page render
@@ -1416,10 +1435,20 @@ function Get-ImagesPerPage {
             }
         }
 
+        # Collect unique image decode failure keys for this page (deduplicate retries)
+        $pageFailedSeen = @{}
+        foreach ($fail in $decodeFailures) {
+            if ($fail.Timestamp -gt $previousPageTime -and $fail.Timestamp -lt $currentPageTime) {
+                $pageFailedSeen[$fail.ImgKey] = $true
+            }
+        }
+        $pageFailedKeys = @($pageFailedSeen.Keys)
+
         $results += [PSCustomObject]@{
-            PageIndex  = $i
-            ImageCount = $imageCount
-            Images     = $pageImageKeys
+            PageIndex    = $i
+            ImageCount   = $imageCount
+            Images       = $pageImageKeys
+            FailedImages = $pageFailedKeys
         }
     }
 
@@ -1791,6 +1820,7 @@ function Start-AnalyzeLogs {
         $halfRefreshPages = Get-PagesWithHalfRefresh $log.Path
         $log | Add-Member -MemberType NoteProperty -Name "HalfRefreshPages" -Value $halfRefreshPages -Force
         $totalImages = ($images | ForEach-Object { $_.ImageCount } | Measure-Object -Sum).Sum
+        $totalFailedImages = ($images | ForEach-Object { $_.FailedImages.Count } | Measure-Object -Sum).Sum
 
         # Extract cover generation time
         $coverTime = Get-CoverGenerationTime $log.Path -DebugMode:$false
@@ -1808,7 +1838,8 @@ function Start-AnalyzeLogs {
         }
         $log | Add-Member -MemberType NoteProperty -Name "EpubPath"    -Value $epubPath    -Force
         $log | Add-Member -MemberType NoteProperty -Name "EpubFolder"  -Value $epubFolder  -Force
-        $log | Add-Member -MemberType NoteProperty -Name "TotalImages" -Value $totalImages -Force
+        $log | Add-Member -MemberType NoteProperty -Name "TotalImages"       -Value $totalImages       -Force
+        $log | Add-Member -MemberType NoteProperty -Name "TotalFailedImages" -Value $totalFailedImages -Force
 
         $logsWithTimes += $log
 
@@ -1902,20 +1933,22 @@ function Start-AnalyzeLogs {
         }
     }
 
-    # Build global sets of all image base names decoded across ALL pages in each log.
+    # Build global sets of all image base names SUCCESSFULLY decoded across all pages in each log.
+    # Only pages with ImageCount > 0 count — pages where all decodes failed are excluded,
+    # so a decode failure does not masquerade as a page-offset effect [~].
     # Used to classify per-page discrepancies: if the "missing" image does appear
-    # somewhere else in the other log, the discrepancy is a page-offset effect [~],
-    # not a true failure [!].
+    # somewhere else in the other log (with a successful decode), the discrepancy is
+    # a page-offset effect [~], not a true failure [!].
     $allBaseNamesA = @{}
     $allBaseNamesB = @{}
     if ($logsWithTimes.Count -eq 2 -and $logA.SectionImageMap -and $logB.SectionImageMap) {
-        foreach ($page in $logA.ImagesPerPage) {
+        foreach ($page in ($logA.ImagesPerPage | Where-Object { $_.ImageCount -gt 0 })) {
             foreach ($k in $page.Images) {
                 $fn = if ($logA.SectionImageMap.ContainsKey($k)) { $logA.SectionImageMap[$k] } else { $k }
                 $allBaseNamesA[[System.IO.Path]::GetFileNameWithoutExtension($fn)] = $true
             }
         }
-        foreach ($page in $logB.ImagesPerPage) {
+        foreach ($page in ($logB.ImagesPerPage | Where-Object { $_.ImageCount -gt 0 })) {
             foreach ($k in $page.Images) {
                 $fn = if ($logB.SectionImageMap.ContainsKey($k)) { $logB.SectionImageMap[$k] } else { $k }
                 $allBaseNamesB[[System.IO.Path]::GetFileNameWithoutExtension($fn)] = $true
@@ -1957,10 +1990,16 @@ function Start-AnalyzeLogs {
             # Determine page label based on cover generation status
             $coverLabel = "Cover"
             if ($logA.CoverGenerationTime -and $logB.CoverGenerationTime) {
-                # Both have cover data
-                if (-not $logA.CoverGenerationTime.Success -or -not $logB.CoverGenerationTime.Success) {
-                    # At least one failed - mark as unfair comparison
-                    $coverLabel = "Cover [!]" # One or both failed to generate cover
+                # Both have cover data - check for failure on either side
+                $covFailA = -not $logA.CoverGenerationTime.Success
+                $covFailB = -not $logB.CoverGenerationTime.Success
+                if ($covFailA -or $covFailB) {
+                    # Use [X] if every failure is a decode failure, [!] if any is a missing-file failure
+                    $anyDecodeFailure = ($covFailA -and $logA.CoverGenerationTime.FailureType -eq "decode") -or
+                                        ($covFailB -and $logB.CoverGenerationTime.FailureType -eq "decode")
+                    $anyMissingFailure = ($covFailA -and $logA.CoverGenerationTime.FailureType -ne "decode") -or
+                                         ($covFailB -and $logB.CoverGenerationTime.FailureType -ne "decode")
+                    $coverLabel = if ($anyMissingFailure) { "Cover [!]" } else { "Cover [X]" }
                 }
             } else {
                 # Only one has cover data - mark as unfair
@@ -2019,6 +2058,8 @@ function Start-AnalyzeLogs {
             # Check for image discrepancies (missing images = potentially unfair comparison)
             $imagesA = 0
             $imagesB = 0
+            $failedA = 0
+            $failedB = 0
 
             if ($row.Page -is [int]) {
                 # Regular page: get images from ImagesPerPage array
@@ -2026,10 +2067,12 @@ function Start-AnalyzeLogs {
 
                 if ($pageIndex -lt $logA.ImagesPerPage.Count) {
                     $imagesA = $logA.ImagesPerPage[$pageIndex].ImageCount
+                    $failedA = $logA.ImagesPerPage[$pageIndex].FailedImages.Count
                 }
 
                 if ($pageIndex -lt $logB.ImagesPerPage.Count) {
                     $imagesB = $logB.ImagesPerPage[$pageIndex].ImageCount
+                    $failedB = $logB.ImagesPerPage[$pageIndex].FailedImages.Count
                 }
             } elseif ($row.Page -like "*Cover*") {
                 # Cover row (handles both "Cover" and "Cover [!]")
@@ -2044,10 +2087,22 @@ function Start-AnalyzeLogs {
                 $coverSuccessA = $row."${colA}_CoverSuccess"
                 $coverSuccessB = $row."${colB}_CoverSuccess"
 
-                # Set image count based on whether cover generation succeeded
-                # True = 1 (cover was generated), False = 0 (cover failed to generate)
-                if ($coverSuccessA -eq $true) { $imagesA = 1 } elseif ($coverSuccessA -eq $false) { $imagesA = 0 }
-                if ($coverSuccessB -eq $true) { $imagesB = 1 } elseif ($coverSuccessB -eq $false) { $imagesB = 0 }
+                # Set image count based on whether cover generation succeeded.
+                # For failures, set failedX=1 only when the failure type is "decode"
+                # (file found, JPEG decode init failed) — that maps to [X] marker.
+                # A "missing" failure (file not found) maps to [!] instead.
+                if ($coverSuccessA -eq $true) {
+                    $imagesA = 1
+                } elseif ($coverSuccessA -eq $false) {
+                    $imagesA = 0
+                    if ($logA.CoverGenerationTime -and $logA.CoverGenerationTime.FailureType -eq "decode") { $failedA = 1 }
+                }
+                if ($coverSuccessB -eq $true) {
+                    $imagesB = 1
+                } elseif ($coverSuccessB -eq $false) {
+                    $imagesB = 0
+                    if ($logB.CoverGenerationTime -and $logB.CoverGenerationTime.FailureType -eq "decode") { $failedB = 1 }
+                }
 
                 # If one log doesn't have cover data at all, mark as 0
                 if ($null -eq $coverSuccessA) { $imagesA = 0 }
@@ -2094,9 +2149,14 @@ function Start-AnalyzeLogs {
                 $discrepancyType = "failure"  # can't classify without maps – treat as failure
             }
 
-            # Mark page label: [!] for true failures only (offset effects shown in Winner column)
+            # Mark page label: [X] for decode failures, [!] for other true failures
+            # (offset effects shown in Winner column only)
             if ($discrepancyType -eq "failure") {
-                $row.Page = "$($row.Page) [!]"
+                if ($failedA -gt 0 -or $failedB -gt 0) {
+                    $row.Page = "$($row.Page) [X]"
+                } else {
+                    $row.Page = "$($row.Page) [!]"
+                }
             }
 
             # Check for cover generation status mismatch (unfair comparison)
@@ -2148,9 +2208,14 @@ function Start-AnalyzeLogs {
                 $winner = "$winner [~]"
             }
 
-            # Add [!] only when misleading: winner did less work (failed cover, fewer images,
-            # or loaded substitute images while loser loaded unique content)
-            if (($discrepancyType -eq "failure" -or $hasCoverMismatch) -and $winner -ne "TIE") {
+            # Determine if the winning side had decode failures (more specific than [!])
+            $winnerHadFailures = $winner -ne "TIE" -and (
+                ($winner -like "*$winnerA*" -and $failedA -gt 0) -or
+                ($winner -like "*$winnerB*" -and $failedB -gt 0))
+
+            # Add [!] only when misleading AND winner did not have decode failures
+            # ([X] is more critical and replaces [!] when decode failure is the cause)
+            if (($discrepancyType -eq "failure" -or $hasCoverMismatch) -and $winner -ne "TIE" -and -not $winnerHadFailures) {
                 $isMisleadingWinner = if ($winner -eq $winnerA) {
                     if ($hasIdentityDiscrepancy -and -not $hasImageDiscrepancy) {
                         # A won with equal count: misleading if B loaded images absent from A's entire log
@@ -2177,9 +2242,18 @@ function Start-AnalyzeLogs {
                 }
             }
 
+            # Add [X] marker to winner if the winning side had decode failures on this page
+            if ($winnerHadFailures) {
+                $winner = "$winner [X]"
+            }
+
+            # Display value: show "X" (red) when decode failed and success count is 0
+            $displayImgA = if ($imagesA -eq 0 -and $failedA -gt 0) { "X" } else { [string]$imagesA }
+            $displayImgB = if ($imagesB -eq 0 -and $failedB -gt 0) { "X" } else { [string]$imagesB }
+
             # Add dynamic image count columns
-            $row | Add-Member -MemberType NoteProperty -Name $imagesColA -Value $imagesA -Force
-            $row | Add-Member -MemberType NoteProperty -Name $imagesColB -Value $imagesB -Force
+            $row | Add-Member -MemberType NoteProperty -Name $imagesColA -Value $displayImgA -Force
+            $row | Add-Member -MemberType NoteProperty -Name $imagesColB -Value $displayImgB -Force
 
             $row | Add-Member -MemberType NoteProperty -Name "Diff_ms" -Value $diff -Force
             $row | Add-Member -MemberType NoteProperty -Name "Percent" -Value "$percent%" -Force
@@ -2241,6 +2315,19 @@ function Start-AnalyzeLogs {
         # Account for " [R]" marker (4 chars) if any row has a half refresh
         if ($comparison | Where-Object { $_.PSObject.Properties["A_HasRefresh"] -and $_.A_HasRefresh }) { $colWidths[$colA] += 4 }
         if ($comparison | Where-Object { $_.PSObject.Properties["B_HasRefresh"] -and $_.B_HasRefresh }) { $colWidths[$colB] += 4 }
+
+        # Page column: base (number/Cover) right-aligned, with 4-char marker suffix always reserved.
+        # Compute base width from stripped values so markers don't inflate the number area.
+        $pageMarkerLen = 4  # " [X]", " [!]", " [~]" are each 4 chars
+        $pageBaseWidth = ($comparison | ForEach-Object {
+            $pv = $_.PSObject.Properties["Page"]
+            if ($null -ne $pv) {
+                ($pv.Value.ToString() -replace " \[X\]","" -replace " \[!\]","" -replace " \[~\]","").Length
+            } else { 0 }
+        } | Measure-Object -Maximum).Maximum
+        $pageBaseWidth = [Math]::Max($pageBaseWidth, "Page".Length)
+        $colWidths["Page"] = $pageBaseWidth + $pageMarkerLen
+
         $rightAlignedCols = @($colA, $colB, $imgColA, $imgColB, "Diff_ms", "Percent")
 
         $headerDisplay = @{ $colA = "A"; $colB = "B"; "Diff_ms" = "Diff" }
@@ -2279,11 +2366,11 @@ function Start-AnalyzeLogs {
                 $fmt = if ($rightAlignedCols -contains $prop) { "{0,$width}" } else { "{0,-$width}" }
 
                 if ($prop -eq $colA -or $prop -eq $imgColA) {
-                    $color = "Blue"
+                    $color = if ($strVal -eq "X") { "Red" } else { "Blue" }
                 } elseif ($prop -eq $colB -or $prop -eq $imgColB) {
-                    $color = "Green"
+                    $color = if ($strVal -eq "X") { "Red" } else { "Green" }
                 } elseif ($prop -eq "Winner") {
-                    $bare = $strVal -replace " \[!\]", "" -replace " \[~\]", ""
+                    $bare = $strVal -replace " \[!\]", "" -replace " \[~\]", "" -replace " \[X\]", ""
                     $color = if ($bare -eq "TIE") { "Gray" }
                              elseif ($bare -eq $winnerA) { "Blue" }
                              elseif ($bare -eq $winnerB) { "Green" }
@@ -2292,7 +2379,30 @@ function Start-AnalyzeLogs {
                     $color = "White"
                 }
 
-                if ($strVal -like "*[!]*") {
+                if ($prop -eq "Page") {
+                    # Right-align base (number or word) within base width, then append 4-char marker
+                    $pageBase = $strVal -replace " \[X\]","" -replace " \[!\]","" -replace " \[~\]",""
+                    Write-Host ("{0,$pageBaseWidth}" -f $pageBase) -NoNewline -ForegroundColor White
+                    if ($strVal.Contains(" [X]")) {
+                        Write-Host " [X]" -NoNewline -ForegroundColor Red
+                    } elseif ($strVal.Contains(" [!]")) {
+                        Write-Host " [!]" -NoNewline -ForegroundColor Red
+                    } elseif ($strVal.Contains(" [~]")) {
+                        Write-Host " [~]" -NoNewline -ForegroundColor Yellow
+                    } else {
+                        Write-Host "    " -NoNewline
+                    }
+                } elseif (($prop -eq $imgColA -or $prop -eq $imgColB) -and $strVal -eq "X") {
+                    Write-Host ($fmt -f $strVal) -ForegroundColor Red -NoNewline
+                } elseif ($strVal.Contains(" [X]")) {
+                    $baseVal = $strVal -replace " \[X\]", ""
+                    $marker = " [X]"
+                    $fullWidth = ($fmt -f $strVal).Length
+                    $pad = $fullWidth - $baseVal.Length - $marker.Length
+                    Write-Host $baseVal -NoNewline -ForegroundColor $color
+                    Write-Host $marker -NoNewline -ForegroundColor Red
+                    if ($pad -gt 0) { Write-Host (" " * $pad) -NoNewline }
+                } elseif ($strVal.Contains(" [!]")) {
                     $baseVal = $strVal -replace " \[!\]", ""
                     $marker = " [!]"
                     $fullWidth = ($fmt -f $strVal).Length
@@ -2300,7 +2410,7 @@ function Start-AnalyzeLogs {
                     Write-Host $baseVal -NoNewline -ForegroundColor $color
                     Write-Host $marker -NoNewline -ForegroundColor Red
                     if ($pad -gt 0) { Write-Host (" " * $pad) -NoNewline }
-                } elseif ($strVal -like "*[~]*") {
+                } elseif ($strVal.Contains(" [~]")) {
                     $baseVal = $strVal -replace " \[~\]", ""
                     $marker = " [~]"
                     $fullWidth = ($fmt -f $strVal).Length
@@ -2341,23 +2451,27 @@ function Start-AnalyzeLogs {
             Write-Host "  - $("Test2".PadRight($legendW)): ${displayNameB} is faster" -ForegroundColor Green
         }
         Write-Host "  - TIE: When the difference is < 1% (statistically insignificant)" -ForegroundColor Gray
+        Write-Host "  -----" -ForegroundColor DarkGray
+        Write-Host "  - " -NoNewline -ForegroundColor Gray
+        Write-Host "[X]" -NoNewline -ForegroundColor Red
+        Write-Host ": Decode failure - image was attempted but failed to decode (more work, no result)" -ForegroundColor Gray
         Write-Host "  - " -NoNewline -ForegroundColor Gray
         Write-WithWarning "[!]" "Red" -NoNewline
-        Write-Host " : True image failure - one version is missing an illustration entirely" -ForegroundColor Gray
+        Write-Host ": Missing image - one version is entirely missing an illustration" -ForegroundColor Gray
         Write-Host "  - " -NoNewline -ForegroundColor Gray
         Write-Host "[~]" -NoNewline -ForegroundColor Yellow
-        Write-Host " : Page offset - same image present in both versions but on different pages" -ForegroundColor Gray
+        Write-Host ": Page offset - same image present in both versions but on different pages" -ForegroundColor Gray
         Write-Host "  - " -NoNewline -ForegroundColor Gray
         Write-Host "[R]" -NoNewline -ForegroundColor Cyan
-        Write-Host " : Refresh Display - page includes an e-ink screen refresh cycle (not content rendering time)" -ForegroundColor Gray
+        Write-Host ": Refresh Display - page includes an e-ink screen refresh cycle (not content rendering time)" -ForegroundColor Gray
         Write-Host ""
 
         # ── Compute all data ─────────────────────────────────────────────────
-        $pagesWithWarnings = $comparison | Where-Object { $_.Winner -like "*[!]*" }
+        $pagesWithWarnings = $comparison | Where-Object { $_.Winner -like "*[!]*" -or $_.Winner -like "*[X]*" }
 
         $aWins = 0; $bWins = 0; $ties = 0
         foreach ($row in $comparison) {
-            $bareWinner = $row.Winner -replace " \[!\]", "" -replace " \[~\]", ""
+            $bareWinner = $row.Winner -replace " \[!\]", "" -replace " \[~\]", "" -replace " \[X\]", ""
             if ($bareWinner -eq $winnerA) { $aWins++ }
             elseif ($bareWinner -eq $winnerB) { $bWins++ }
             elseif ($bareWinner -eq "TIE") { $ties++ }
@@ -2374,9 +2488,11 @@ function Start-AnalyzeLogs {
             if ($csB) { $covSuccessB++ } else { $covFailedB++ }
         }
         # Only count [!] true-failure pages (not [~] offset pages) in success/failed tallies
-        foreach ($page in ($comparison | Where-Object { $_.Page -notlike "*Cover*" -and $_.Winner -notlike "*[~]*" -and ([int]$_.$imgColA -gt 0 -or [int]$_.$imgColB -gt 0) })) {
-            if ([int]$page.$imgColA -gt 0) { $imgSuccessA++ } else { $imgFailedA++ }
-            if ([int]$page.$imgColB -gt 0) { $imgSuccessB++ } else { $imgFailedB++ }
+        foreach ($page in ($comparison | Where-Object { $_.Page -notlike "*Cover*" -and $_.Winner -notlike "*[~]*" -and ($_.($imgColA) -ne "0" -or $_.($imgColB) -ne "0") })) {
+            $imgAVal = if ($page.$imgColA -eq "X") { 0 } else { [int]$page.$imgColA }
+            $imgBVal = if ($page.$imgColB -eq "X") { 0 } else { [int]$page.$imgColB }
+            if ($imgAVal -gt 0) { $imgSuccessA++ } else { $imgFailedA++ }
+            if ($imgBVal -gt 0) { $imgSuccessB++ } else { $imgFailedB++ }
         }
         $coverDiscrepancy = ($covSuccessA -ne $covSuccessB) -and (($covSuccessA + $covFailedA) -gt 0)
 
@@ -2392,22 +2508,28 @@ function Start-AnalyzeLogs {
             $occA = @{}; $occB = @{}
             $fnMapA = @{}; $fnMapB = @{}
             for ($pi = 0; $pi -lt $logA.ImagesPerPage.Count; $pi++) {
+                $seenBasesA = @{}
                 foreach ($k in $logA.ImagesPerPage[$pi].Images) {
                     $fn   = if ($logA.SectionImageMap.ContainsKey($k)) { $logA.SectionImageMap[$k] }
                             elseif ($logB.SectionImageMap.ContainsKey($k)) { $logB.SectionImageMap[$k] }
                             else { $k }
                     $base = [System.IO.Path]::GetFileNameWithoutExtension($fn)
+                    if ($seenBasesA.ContainsKey($base)) { continue }
+                    $seenBasesA[$base] = $true
                     if (-not $occA.ContainsKey($base)) { $occA[$base] = [System.Collections.Generic.List[int]]::new() }
                     $occA[$base].Add($pi + 1)
                     $fnMapA[$base] = [System.IO.Path]::GetFileName($fn)
                 }
             }
             for ($pi = 0; $pi -lt $logB.ImagesPerPage.Count; $pi++) {
+                $seenBasesB = @{}
                 foreach ($k in $logB.ImagesPerPage[$pi].Images) {
                     $fn   = if ($logB.SectionImageMap.ContainsKey($k)) { $logB.SectionImageMap[$k] }
                             elseif ($logA.SectionImageMap.ContainsKey($k)) { $logA.SectionImageMap[$k] }
                             else { $k }
                     $base = [System.IO.Path]::GetFileNameWithoutExtension($fn)
+                    if ($seenBasesB.ContainsKey($base)) { continue }
+                    $seenBasesB[$base] = $true
                     if (-not $occB.ContainsKey($base)) { $occB[$base] = [System.Collections.Generic.List[int]]::new() }
                     $occB[$base].Add($pi + 1)
                     $fnMapB[$base] = [System.IO.Path]::GetFileName($fn)
@@ -2460,13 +2582,14 @@ function Start-AnalyzeLogs {
 
         # Column width calculation
         $sumLabels = @("Pages analyzed", "Images rendered")
+        if ($logA.TotalFailedImages -gt 0 -or $logB.TotalFailedImages -gt 0) { $sumLabels += "Decode errors" }
         if ($failureOccs.Count -gt 0 -or $failureOccsB.Count -gt 0) { $sumLabels += "Image failures" }
         if ($null -ne $covStatA) { $sumLabels += "Cover generation" }
         $sumLabels += @("$shortNameA faster", "$shortNameB faster", "Ties (< 1%)")
         $sumLabelW = ($sumLabels | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
 
-        $colAVals = @("$($logA.TotalImages)", "$($failureOccs.Count)", "$covStatA", "$aWins", "$bWins", "$ties")
-        $colBVals = @("$($logB.TotalImages)", "$($failureOccsB.Count)", "$covStatB")
+        $colAVals = @("$($logA.TotalImages)", "$($logA.TotalFailedImages)", "$($failureOccs.Count)", "$covStatA", "$aWins", "$bWins", "$ties")
+        $colBVals = @("$($logB.TotalImages)", "$($logB.TotalFailedImages)", "$($failureOccsB.Count)", "$covStatB")
         $sumColAW = ([int[]](@($shortNameA.Length) + ($colAVals | ForEach-Object { $_.Length })) | Measure-Object -Maximum).Maximum
         $sumColBW = ([int[]](@($shortNameB.Length) + ($colBVals | ForEach-Object { $_.Length })) | Measure-Object -Maximum).Maximum
 
@@ -2523,6 +2646,11 @@ function Start-AnalyzeLogs {
         $imgColorA = if ($logA.TotalImages -ge $logB.TotalImages) { "Green" } else { "Red" }
         $imgColorB = if ($logB.TotalImages -ge $logA.TotalImages) { "Green" } else { "Red" }
         Write-SumRow "Images rendered" "$($logA.TotalImages)" "$($logB.TotalImages)" $imgColorA $imgColorB
+        if ($logA.TotalFailedImages -gt 0 -or $logB.TotalFailedImages -gt 0) {
+            $decErrColorA = if ($logA.TotalFailedImages -gt 0) { "Red" } else { "Green" }
+            $decErrColorB = if ($logB.TotalFailedImages -gt 0) { "Red" } else { "Green" }
+            Write-SumRow "Decode errors" "$($logA.TotalFailedImages)" "$($logB.TotalFailedImages)" $decErrColorA $decErrColorB
+        }
         if ($failureOccs.Count -gt 0 -or $failureOccsB.Count -gt 0) {
             $fColorA = if ($failureOccs.Count  -gt 0) { "Red" } else { "Green" }
             $fColorB = if ($failureOccsB.Count -gt 0) { "Red" } else { "Green" }
@@ -2578,21 +2706,107 @@ function Start-AnalyzeLogs {
         Write-Host ""
 
         # ── Unfair comparison warnings ────────────────────────────────────────
-        if ($pagesWithWarnings -or $coverDiscrepancy) {
-            Write-Host "UNFAIR COMPARISONS DETECTED:" -ForegroundColor Red
-            if ($coverDiscrepancy) {
-                $covStatusA = if ($covSuccessA -gt 0) { "Success" } else { "Failed" }
-                $covStatusB = if ($covSuccessB -gt 0) { "Success" } else { "Failed" }
-                Write-Host "  Cover: " -NoNewline -ForegroundColor Yellow
-                Write-Host $shortNameA -NoNewline -ForegroundColor Blue
-                Write-Host " $covStatusA" -NoNewline -ForegroundColor Yellow
-                Write-Host "  |  " -NoNewline -ForegroundColor Yellow
-                Write-Host $shortNameB -NoNewline -ForegroundColor Green
-                Write-Host " $covStatusB" -ForegroundColor Yellow
+        # Only flag unfair when the WINNER is the one with the issue.
+        # If the loser failed/offset, the winner's advantage is conservative — not unfair.
+
+        # Cover: unfair only if the cover winner's generation failed
+        $coverWinnerFailed = $false
+        $covWinnerLabel    = ""
+        $covWinnerColor    = "White"
+        if (($covSuccessA + $covFailedA) -gt 0) {
+            $coverRow2 = $comparison | Where-Object { $_.Page -like "*Cover*" } | Select-Object -First 1
+            if ($coverRow2) {
+                $covRowWinner = $coverRow2.Winner -replace " \[!\]", "" -replace " \[~\]", "" -replace " \[X\]", ""
+                if ($covRowWinner -eq $winnerA -and $covSuccessA -eq 0) {
+                    $coverWinnerFailed = $true; $covWinnerLabel = $shortNameA; $covWinnerColor = "Blue"
+                } elseif ($covRowWinner -eq $winnerB -and $covSuccessB -eq 0) {
+                    $coverWinnerFailed = $true; $covWinnerLabel = $shortNameB; $covWinnerColor = "Green"
+                }
             }
         }
 
-        # ── Failure and offset details ────────────────────────────────────────
+        # Per-page: categorise by which marker the winning side carries
+        $xWinPages     = @($comparison | Where-Object { $_.Page -notlike "*Cover*" -and $_.Winner -like "*[X]*" })
+        $exclWinPages  = @($comparison | Where-Object { $_.Page -notlike "*Cover*" -and $_.Winner -like "*[!]*" })
+        $tildeWinPages = @($comparison | Where-Object { $_.Page -notlike "*Cover*" -and $_.Winner -like "*[~]*" })
+
+        $hasUnfairWin = $coverWinnerFailed -or
+                        $xWinPages.Count -gt 0 -or
+                        $exclWinPages.Count -gt 0 -or
+                        $tildeWinPages.Count -gt 0
+
+        if ($hasUnfairWin) {
+            Write-Host "UNFAIR COMPARISONS DETECTED:" -ForegroundColor Red
+
+            if ($coverWinnerFailed) {
+                Write-Host "  Cover: winner (" -NoNewline -ForegroundColor Yellow
+                Write-Host $covWinnerLabel -NoNewline -ForegroundColor $covWinnerColor
+                Write-Host ") did not generate cover image" -ForegroundColor Yellow
+            }
+            if ($xWinPages.Count -gt 0) {
+                Write-Host "  " -NoNewline
+                Write-Host "[X]" -NoNewline -ForegroundColor Red
+                Write-Host " Winner failed to decode/render image" -ForegroundColor Yellow
+                $xByWinner = @{}
+                foreach ($p in $xWinPages) {
+                    $bareW = $p.Winner -replace " \[!\]","" -replace " \[~\]","" -replace " \[X\]",""
+                    $winnerLabel = if ($bareW -eq $winnerA) { $shortNameA } elseif ($bareW -eq $winnerB) { $shortNameB } else { $bareW }
+                    $pageNum = $p.Page -replace " \[X\]","" -replace " \[!\]","" -replace " \[~\]",""
+                    if (-not $xByWinner.ContainsKey($winnerLabel)) { $xByWinner[$winnerLabel] = @() }
+                    $xByWinner[$winnerLabel] += $pageNum.Trim()
+                }
+                foreach ($wLabel in $xByWinner.Keys) {
+                    $wColor = if ($wLabel -eq $shortNameA) { "Blue" } else { "Green" }
+                    $pageList = $xByWinner[$wLabel] -join ", "
+                    Write-Host "      Winner " -NoNewline -ForegroundColor Yellow
+                    Write-Host $wLabel -NoNewline -ForegroundColor $wColor
+                    Write-Host " failed: pages $pageList" -ForegroundColor Yellow
+                }
+            }
+            if ($exclWinPages.Count -gt 0) {
+                Write-Host "  " -NoNewline
+                Write-WithWarning "[!]" "Red" -NoNewline
+                Write-Host " Winner is missing an image entirely" -ForegroundColor Yellow
+                $exclByWinner = @{}
+                foreach ($p in $exclWinPages) {
+                    $bareW = $p.Winner -replace " \[!\]","" -replace " \[~\]","" -replace " \[X\]",""
+                    $winnerLabel = if ($bareW -eq $winnerA) { $shortNameA } elseif ($bareW -eq $winnerB) { $shortNameB } else { $bareW }
+                    $pageNum = $p.Page -replace " \[X\]","" -replace " \[!\]","" -replace " \[~\]",""
+                    if (-not $exclByWinner.ContainsKey($winnerLabel)) { $exclByWinner[$winnerLabel] = @() }
+                    $exclByWinner[$winnerLabel] += $pageNum.Trim()
+                }
+                foreach ($wLabel in $exclByWinner.Keys) {
+                    $wColor = if ($wLabel -eq $shortNameA) { "Blue" } else { "Green" }
+                    $pageList = $exclByWinner[$wLabel] -join ", "
+                    Write-Host "      Winner " -NoNewline -ForegroundColor Yellow
+                    Write-Host $wLabel -NoNewline -ForegroundColor $wColor
+                    Write-Host " failed: pages $pageList" -ForegroundColor Yellow
+                }
+            }
+            if ($tildeWinPages.Count -gt 0) {
+                Write-Host "  " -NoNewline
+                Write-Host "[~]" -NoNewline -ForegroundColor Yellow
+                Write-Host " Winner rendered image on a different page" -ForegroundColor Yellow
+                $tildeByWinner = @{}
+                foreach ($p in $tildeWinPages) {
+                    $bareW = $p.Winner -replace " \[!\]","" -replace " \[~\]","" -replace " \[X\]",""
+                    $winnerLabel = if ($bareW -eq $winnerA) { $shortNameA } elseif ($bareW -eq $winnerB) { $shortNameB } else { $bareW }
+                    $pageNum = $p.Page -replace " \[X\]","" -replace " \[!\]","" -replace " \[~\]",""
+                    if (-not $tildeByWinner.ContainsKey($winnerLabel)) { $tildeByWinner[$winnerLabel] = @() }
+                    $tildeByWinner[$winnerLabel] += $pageNum.Trim()
+                }
+                foreach ($wLabel in $tildeByWinner.Keys) {
+                    $wColor = if ($wLabel -eq $shortNameA) { "Blue" } else { "Green" }
+                    $pageList = $tildeByWinner[$wLabel] -join ", "
+                    Write-Host "      Winner " -NoNewline -ForegroundColor Yellow
+                    Write-Host $wLabel -NoNewline -ForegroundColor $wColor
+                    Write-Host " offset: pages $pageList" -ForegroundColor Yellow
+                }
+            }
+            Write-Host ""
+        }
+
+        # ── Failure and offset details (image-level, shown when data exists) ─────
         if ($failureOccs.Count -gt 0) {
             Write-WithWarning "[!]" "Red" -NoNewline
             Write-Host " Image not rendered in " -NoNewline -ForegroundColor White
@@ -2679,8 +2893,9 @@ function Start-AnalyzeLogs {
             Write-Host ""
         }
 
-        if ($pagesWithWarnings -or $coverDiscrepancy) {
-            Write-Host "If the winner failed to generate images or cover, the result may not represent true performance!" -ForegroundColor Red
+        if ($hasUnfairWin) {
+            Write-Host "Pages marked above may not represent true performance - winner did less rendering work!" -ForegroundColor Red
+            Write-Host ""
             Write-Host ""
         }
 
@@ -2708,7 +2923,7 @@ function Start-AnalyzeLogs {
 
         # [!] if the overall winner has any unfair pages
         $resultWinner = if ($avgDiff -lt 0) { $winnerA } else { $winnerB }
-        $resultHasUnfair = $pagesWithWarnings | Where-Object { ($_.Winner -replace " \[!\]", "") -eq $resultWinner }
+        $resultHasUnfair = $pagesWithWarnings | Where-Object { ($_.Winner -replace " \[!\]", "" -replace " \[X\]", "") -eq $resultWinner }
         $resultWarning = if ($resultHasUnfair) { " [!]" } else { "" }
 
         $avgDiffS = [Math]::Round([Math]::Abs($avgDiff) / 1000, 2)
@@ -2843,20 +3058,24 @@ function Start-AnalyzeLogs {
             if ($mostImproved.Page -like "Cover*" -and $logB.CoverGenerationTime) {
                 $mostIsMisleading = -not $logB.CoverGenerationTime.Success  # misleading if B (winner) failed
             } else {
-                $mostIsMisleading = [int]$mostImproved.$imgColB -lt [int]$mostImproved.$imgColA
+                $mostBImg = if ($mostImproved.$imgColB -eq "X") { 0 } else { [int]$mostImproved.$imgColB }
+                $mostAImg = if ($mostImproved.$imgColA -eq "X") { 0 } else { [int]$mostImproved.$imgColA }
+                $mostIsMisleading = $mostBImg -lt $mostAImg
             }
 
             # Regression: A won (most positive diff)
             if ($leastImproved.Page -like "Cover*" -and $logA.CoverGenerationTime) {
                 $leastIsMisleading = -not $logA.CoverGenerationTime.Success  # misleading if A (winner) failed
             } else {
-                $leastIsMisleading = [int]$leastImproved.$imgColA -lt [int]$leastImproved.$imgColB
+                $leastAImg = if ($leastImproved.$imgColA -eq "X") { 0 } else { [int]$leastImproved.$imgColA }
+                $leastBImg = if ($leastImproved.$imgColB -eq "X") { 0 } else { [int]$leastImproved.$imgColB }
+                $leastIsMisleading = $leastAImg -lt $leastBImg
             }
 
             $impactLabelW = "Least improved".Length  # = 14, widest label
 
             # Most improved: B had the most negative diff
-            $pageDisplay = if ($mostImproved.Page -like "Cover*") { if ($mostIsMisleading) { "Cover [!]" } else { "Cover" } } else { "Page $($mostImproved.Page)" }
+            $pageDisplay = if ($mostImproved.Page -like "Cover*") { $mostImproved.Page } else { "Page $($mostImproved.Page)" }
             if ([Math]::Abs($mostImprovedPercent) -gt 1) {
                 $warningText = if ($mostIsMisleading) { " [!]" } else { "" }
                 Write-WithWarning "  $("Most improved".PadRight($impactLabelW)): $pageDisplay ($displayNameB) is $([Math]::Abs($mostImproved.Diff_ms)) ms faster ($($mostImproved.Percent))$warningText" "Green"
@@ -2865,7 +3084,7 @@ function Start-AnalyzeLogs {
             }
 
             # Worst case for B: regression or least improved
-            $pageDisplay = if ($leastImproved.Page -like "Cover*") { if ($leastIsMisleading) { "Cover [!]" } else { "Cover" } } else { "Page $($leastImproved.Page)" }
+            $pageDisplay = if ($leastImproved.Page -like "Cover*") { $leastImproved.Page } else { "Page $($leastImproved.Page)" }
             $regressionHasRefresh = $leastImproved.PSObject.Properties["B_HasRefresh"] -and $leastImproved.B_HasRefresh
             if ($gotWorse -and $leastImprovedPercent -gt 1) {
                 $warningText = if ($leastIsMisleading) { " [!]" } else { "" }
@@ -2929,16 +3148,16 @@ function Start-AnalyzeLogs {
         # Only flag [!] if the winner had fewer images/failed cover on [!] pages
         # (if the loser failed, the winner's advantage is conservative, not misleading)
         $hasUnfairComparisonInOptimization = $false
-        $pagesWithWarnings = $comparison | Where-Object { $_.Winner -like "*[!]*" }
+        $pagesWithWarnings = $comparison | Where-Object { $_.Winner -like "*[!]*" -or $_.Winner -like "*[X]*" }
         foreach ($wPage in $pagesWithWarnings) {
-            $pageWinner = ($wPage.Winner -replace " \[!\]", "")
+            $pageWinner = ($wPage.Winner -replace " \[!\]", "" -replace " \[X\]", "")
             $overallWinnerWonThisPage = ($totalTimeSaved -lt 0 -and $pageWinner -eq $winnerA) -or
                                         ($totalTimeSaved -gt 0 -and $pageWinner -eq $winnerB)
             if ($overallWinnerWonThisPage) {
                 $imgAval = $wPage.PSObject.Properties[$imgColA]
                 $imgBval = $wPage.PSObject.Properties[$imgColB]
-                $imgA = if ($null -ne $imgAval) { [int]$imgAval.Value } else { 0 }
-                $imgB = if ($null -ne $imgBval) { [int]$imgBval.Value } else { 0 }
+                $imgA = if ($null -ne $imgAval) { if ($imgAval.Value -eq "X") { 0 } else { [int]$imgAval.Value } } else { 0 }
+                $imgB = if ($null -ne $imgBval) { if ($imgBval.Value -eq "X") { 0 } else { [int]$imgBval.Value } } else { 0 }
                 # Winner had fewer images = potentially unfair advantage
                 if (($totalTimeSaved -lt 0 -and $imgA -lt $imgB) -or
                     ($totalTimeSaved -gt 0 -and $imgB -lt $imgA)) {
@@ -3128,22 +3347,22 @@ function Start-AnalyzeLogs {
             image_failures_a_count = $failureOccs.Count
             image_failures_b_count = $failureOccsB.Count
             page_offset_count      = $offsetOccs.Count
-            has_unfair_pages       = [bool]($comparison | Where-Object { $_.Winner -like "*[!]*" })
+            has_unfair_pages       = [bool]($comparison | Where-Object { $_.Winner -like "*[!]*" -or $_.Winner -like "*[X]*" })
             a_half_refresh_count   = ($comparison | Where-Object { $_.PSObject.Properties["A_HasRefresh"] -and $_.A_HasRefresh }).Count
             b_half_refresh_count   = ($comparison | Where-Object { $_.PSObject.Properties["B_HasRefresh"] -and $_.B_HasRefresh }).Count
         }
 
         $jsonPages = @()
         foreach ($row in $comparison) {
-            $bareWinner = $row.Winner -replace " \[!\]", "" -replace " \[~\]", ""
+            $bareWinner = $row.Winner -replace " \[!\]", "" -replace " \[~\]", "" -replace " \[X\]", ""
             $isUnfair   = $row.Winner -like "*[!]*"
 
             $pageObj = [ordered]@{
                 page          = $row.Page
                 a_ms          = [int]$row.$colA
                 b_ms          = [int]$row.$colB
-                a_images      = [int]$row.$imgColA
-                b_images      = [int]$row.$imgColB
+                a_images      = if ($row.$imgColA -eq "X") { -1 } else { [int]$row.$imgColA }
+                b_images      = if ($row.$imgColB -eq "X") { -1 } else { [int]$row.$imgColB }
                 diff_ms       = [int]$row.Diff_ms
                 diff_percent  = [double]($row.Percent -replace '%', '')
                 winner        = $bareWinner
@@ -3235,7 +3454,7 @@ function Start-AnalyzeLogs {
         $null = $md.AppendLine("")
 
         # Unfair pages warning (if any)
-        $unfairPages = $comparison | Where-Object { $_.Winner -like "*[!]*" }
+        $unfairPages = $comparison | Where-Object { $_.Winner -like "*[!]*" -or $_.Winner -like "*[X]*" }
         if ($unfairPages) {
             $null = $md.AppendLine("> [!WARNING]")
             $null = $md.AppendLine("> Pages marked with [!] have content discrepancies (different image counts or cover generation results).")
@@ -3251,8 +3470,8 @@ function Start-AnalyzeLogs {
         $null = $md.AppendLine("|------|-----:|-----:|------:|------:|--------:|--------:|--------|")
 
         foreach ($row in $comparison) {
-            $w = $row.Winner -replace " \[!\]", ""
-            $flag = if ($row.Winner -like "*[!]*") { " [!]" } else { "" }
+            $w = $row.Winner -replace " \[!\]", "" -replace " \[X\]", ""
+            $flag = if ($row.Winner -like "*[!]*") { " [!]" } elseif ($row.Winner -like "*[X]*") { " [X]" } else { "" }
             $winnerMd = switch ($w) {
                 "TIE" { "TIE" }
                 $winnerA { "**A**$flag" }
@@ -3284,6 +3503,9 @@ function Start-AnalyzeLogs {
         $null = $md.AppendLine("|--------|------:|------:|")
         $null = $md.AppendLine("| Pages analyzed | $($comparison.Count) | $($comparison.Count) |")
         $null = $md.AppendLine("| Total images rendered | $($logA.TotalImages) | $($logB.TotalImages) |")
+        if ($logA.TotalFailedImages -gt 0 -or $logB.TotalFailedImages -gt 0) {
+            $null = $md.AppendLine("| Decode errors | $($logA.TotalFailedImages) | $($logB.TotalFailedImages) |")
+        }
         if ($failureOccs.Count -gt 0 -or $failureOccsB.Count -gt 0) {
             $null = $md.AppendLine("| Image failures | $($failureOccs.Count) | $($failureOccsB.Count) |")
         }
@@ -3310,15 +3532,15 @@ function Start-AnalyzeLogs {
             $null = $md.AppendLine("## Unfair Comparisons Detail")
             $null = $md.AppendLine("")
             foreach ($up in $unfairPages) {
-                $upWinner = $up.Winner -replace " \[!\]", ""
-                $upImgA = $up.PSObject.Properties[$imgColA]; $upImgAv = if ($null -ne $upImgA) { [int]$upImgA.Value } else { 0 }
-                $upImgB = $up.PSObject.Properties[$imgColB]; $upImgBv = if ($null -ne $upImgB) { [int]$upImgB.Value } else { 0 }
+                $upWinner = $up.Winner -replace " \[!\]", "" -replace " \[X\]", ""
+                $upImgA = $up.PSObject.Properties[$imgColA]; $upImgAv = if ($null -ne $upImgA) { if ($upImgA.Value -eq "X") { 0 } else { [int]$upImgA.Value } } else { 0 }
+                $upImgB = $up.PSObject.Properties[$imgColB]; $upImgBv = if ($null -ne $upImgB) { if ($upImgB.Value -eq "X") { 0 } else { [int]$upImgB.Value } } else { 0 }
                 $upCs = $up.PSObject.Properties["${colA}_CoverSuccess"]
                 $upWinnerDisplay = if ($upWinner -eq $winnerA) { $shortNameA } elseif ($upWinner -eq $winnerB) { $shortNameB } else { $upWinner }
                 if ($null -ne $upCs -and $upCs.Value -ne $null -and $upCs.Value -ne '') {
                     $statusA = if ([bool]$upCs.Value) { "SUCCESS" } else { "FAILED" }
                     $statusB = if ([bool]$up.PSObject.Properties["${colB}_CoverSuccess"].Value) { "SUCCESS" } else { "FAILED" }
-                    $null = $md.AppendLine("- **Cover [!]**: $upWinnerDisplay faster - cover generation ${shortNameA}: $statusA, ${shortNameB}: $statusB")
+                    $null = $md.AppendLine("- **$($up.Page)**: $upWinnerDisplay faster - cover generation ${shortNameA}: $statusA, ${shortNameB}: $statusB")
                     if (($upWinner -eq $winnerA -and $statusA -eq "FAILED") -or ($upWinner -eq $winnerB -and $statusB -eq "FAILED")) {
                         $null = $md.AppendLine("  > [!] Unfair advantage: winner failed to generate the cover - missing work may explain the speed difference")
                     } else {
@@ -3448,8 +3670,8 @@ function Start-AnalyzeLogs {
         if ($uniqueTypes -gt 1) {
             $null = $md.AppendLine("## Optimization Impact")
             $null = $md.AppendLine("")
-            $mdPageMost  = if ($mostImproved.Page  -like "Cover*") { if ($mostIsMisleading)  { "Cover [!]" } else { "Cover" } } else { "Page $($mostImproved.Page)" }
-            $mdPageLeast = if ($leastImproved.Page -like "Cover*") { if ($leastIsMisleading) { "Cover [!]" } else { "Cover" } } else { "Page $($leastImproved.Page)" }
+            $mdPageMost  = if ($mostImproved.Page  -like "Cover*") { $mostImproved.Page  } else { "Page $($mostImproved.Page)" }
+            $mdPageLeast = if ($leastImproved.Page -like "Cover*") { $leastImproved.Page } else { "Page $($leastImproved.Page)" }
             $mostPct = [Math]::Abs([double]($mostImproved.Percent -replace '%', ''))
             if ($mostPct -gt 1) {
                 $mostFlag = if ($mostIsMisleading) { " [!]" } else { "" }
@@ -3617,12 +3839,13 @@ function Start-AnalyzeLogs {
                     Write-Host "$($timeB.ToString().PadLeft($msWidthBar))ms " -NoNewline -ForegroundColor Gray
 
                     # Winner + page marker at end of line
-                    # [!] = true image failure, [~] = page-offset effect
+                    # [!] = true image failure, [X] = decode failure, [~] = page-offset effect
                     $isFailureBar = ($row.Winner -like "*[!]*" -or $row.Page -like "*[!]*")
+                    $isDecodeFailBar = ($row.Winner -like "*[X]*" -or $row.Page -like "*[X]*")
                     $isOffsetBar  = ($row.Winner -like "*[~]*")
-                    $lineMarker   = if ($isFailureBar) { " [!]" } elseif ($isOffsetBar) { " [~]" } else { "" }
-                    $markerColor  = if ($isFailureBar) { "Red" } else { "Yellow" }
-                    $bareWinnerChart = $row.Winner -replace " \[!\]", "" -replace " \[~\]", ""
+                    $lineMarker   = if ($isDecodeFailBar) { " [X]" } elseif ($isFailureBar) { " [!]" } elseif ($isOffsetBar) { " [~]" } else { "" }
+                    $markerColor  = if ($isDecodeFailBar -or $isFailureBar) { "Red" } else { "Yellow" }
+                    $bareWinnerChart = $row.Winner -replace " \[!\]", "" -replace " \[~\]", "" -replace " \[X\]", ""
                     if ($bareWinnerChart -eq "TIE") {
                         Write-Host "TIE" -NoNewline -ForegroundColor Gray
                         if ($lineMarker) { Write-Host $lineMarker -NoNewline -ForegroundColor $markerColor }
@@ -3702,11 +3925,8 @@ function Start-AnalyzeLogs {
                     Write-Host " $($timeA.ToString().PadLeft($msWidthTrend))ms" -NoNewline -ForegroundColor Gray
                     Write-Host " | " -NoNewline -ForegroundColor Gray
 
-                    # Trend line B + page marker at end
-                    $isFailureTrend = ($row.Winner -like "*[!]*" -or $row.Page -like "*[!]*")
-                    $isOffsetTrend  = ($row.Winner -like "*[~]*")
-                    $lineMarker = if ($isFailureTrend) { " [!]" } elseif ($isOffsetTrend) { " [~]" } else { "" }
-                    $markerColorTrend = if ($isFailureTrend) { "Red" } else { "Yellow" }
+                    # Trend line B — no winner marker (both A and B are shown, no comparison side)
+                    $lineMarker = ""
                     Write-Host "B [" -NoNewline -ForegroundColor Green
                     Write-Host (" " * $scaleB) -NoNewline
                     Write-Host "*" -NoNewline -ForegroundColor Green
