@@ -19,6 +19,8 @@ $global:CaptureSuccess = $false
 # Session port memory for dual device capture (persists within a script run)
 $global:SessionLeftPort = $null
 $global:SessionRightPort = $null
+$global:SessionBookA = $null   # book type for LEFT device (e.g. ORIGINAL)
+$global:SessionBookB = $null   # book type for RIGHT device (e.g. OPTIMIZED)
 
 # ============================================================
 # FIRMWARE CACHE SYSTEM
@@ -264,7 +266,11 @@ function Show-MainMenu {
     Write-Host "  EPUB OPTIMIZATION BENCHMARK" -ForegroundColor Cyan
     Write-Host "========================================" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "Select an option:" -ForegroundColor Yellow
+    Write-Host "  IMPORTANT: Serial logging must be enabled on the device" -ForegroundColor DarkRed
+    Write-Host "  Build and flash with: " -NoNewline -ForegroundColor DarkGray
+    Write-Host "pio run -e default --target upload" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host " Select an option:" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "  [1] Capture - Single Device" -ForegroundColor White
     Write-Host "  [2] Capture - Dual Devices" -ForegroundColor White
@@ -276,12 +282,13 @@ function Show-MainMenu {
 
 function Show-CaptureCompleteMenu {
     Write-Host ""
-    Write-Host "What would you like to do next?" -ForegroundColor Yellow
+    Write-Host " What would you like to do next?" -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "  [0] Capture another book" -ForegroundColor Green
-    Write-Host "  [1] Analyze captured logs" -ForegroundColor White
-    Write-Host "  [2] Return to main menu" -ForegroundColor White
-    Write-Host "  [3] Exit" -ForegroundColor Gray
+    Write-Host "  [1] Capture - Single Device" -ForegroundColor White
+    Write-Host "  [2] Capture - Dual Devices" -ForegroundColor White
+    Write-Host "  [3] Analyze Logs" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  [0] Main Menu" -ForegroundColor Gray
     Write-Host ""
 }
 
@@ -309,7 +316,7 @@ function Start-SingleDeviceCapture {
     Write-Host "  SINGLE DEVICE CAPTURE - Port Detection" -ForegroundColor Cyan
     Write-Host "========================================" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "Detecting available COM ports..." -ForegroundColor Cyan
+    Write-Host " Detecting available COM ports..." -ForegroundColor Cyan
 
     # Get port names and sort them
     $rawPorts = [System.IO.Ports.SerialPort]::GetPortNames()
@@ -869,23 +876,41 @@ function Start-DualDeviceCapture {
 
         Write-Host ""
 
-        # Book selection
-        Write-Host "  LEFT  ($leftPort)  [1=ORIGINAL  2=OPTIMIZED  3=Custom]: " -ForegroundColor White -NoNewline
-        $choiceA = Read-Host
-        switch ($choiceA) {
-            "1" { $bookA = "ORIGINAL" }
-            "2" { $bookA = "OPTIMIZED" }
-            "3" { $bookA = Read-Host "  Custom name for LEFT" }
-            default { $bookA = "UNKNOWN" }
+        # Book selection — offer to reuse previous assignment if devices were reused
+        $bookA = $null
+        $bookB = $null
+        if ($reusingSession -and $global:SessionBookA -and $global:SessionBookB) {
+            Write-Host "  Same book assignment as last session?" -ForegroundColor Cyan
+            Write-Host "    LEFT  ($leftPort)  ->  $($global:SessionBookA)" -ForegroundColor Green
+            Write-Host "    RIGHT ($rightPort)  ->  $($global:SessionBookB)" -ForegroundColor Green
+            Write-Host ""
+            Write-Host "  [ENTER] Keep same  [ESC] Change: " -ForegroundColor Yellow -NoNewline
+            $bookKey = [Console]::ReadKey($true)
+            Write-Host ""
+            if ($bookKey.Key -eq [ConsoleKey]::Enter) {
+                $bookA = $global:SessionBookA
+                $bookB = $global:SessionBookB
+            }
         }
 
-        Write-Host "  RIGHT ($rightPort)  [1=ORIGINAL  2=OPTIMIZED  3=Custom]: " -ForegroundColor White -NoNewline
-        $choiceB = Read-Host
-        switch ($choiceB) {
-            "1" { $bookB = "ORIGINAL" }
-            "2" { $bookB = "OPTIMIZED" }
-            "3" { $bookB = Read-Host "  Custom name for RIGHT" }
-            default { $bookB = "UNKNOWN" }
+        if (-not $bookA -or -not $bookB) {
+            Write-Host "  LEFT  ($leftPort)  [1=ORIGINAL  2=OPTIMIZED  3=Custom]: " -ForegroundColor White -NoNewline
+            $choiceA = Read-Host
+            switch ($choiceA) {
+                "1" { $bookA = "ORIGINAL" }
+                "2" { $bookA = "OPTIMIZED" }
+                "3" { $bookA = Read-Host "  Custom name for LEFT" }
+                default { $bookA = "UNKNOWN" }
+            }
+
+            Write-Host "  RIGHT ($rightPort)  [1=ORIGINAL  2=OPTIMIZED  3=Custom]: " -ForegroundColor White -NoNewline
+            $choiceB = Read-Host
+            switch ($choiceB) {
+                "1" { $bookB = "ORIGINAL" }
+                "2" { $bookB = "OPTIMIZED" }
+                "3" { $bookB = Read-Host "  Custom name for RIGHT" }
+                default { $bookB = "UNKNOWN" }
+            }
         }
 
         Write-Host ""
@@ -1161,6 +1186,10 @@ function Start-DualDeviceCapture {
     }
 
     $global:CaptureSuccess = $captureSuccess
+    if ($captureSuccess -and $bookA -and $bookB) {
+        $global:SessionBookA = $bookA
+        $global:SessionBookB = $bookB
+    }
     return
 }
 
@@ -1209,6 +1238,7 @@ function Get-CoverGenerationTime {
                 DurationSec = $durationSec
                 Success     = $true
                 Found       = $true
+                FromCache   = $false
                 FailureType = $null
             }
 
@@ -1233,10 +1263,30 @@ function Get-CoverGenerationTime {
                 DurationSec = $durationSec
                 Success     = $false
                 Found       = $true
+                FromCache   = $false
                 FailureType = $failureType
             }
 
             return $result
+        }
+    }
+
+    # No cover generation found — check if cover was loaded from cache
+    $cachePattern = "\[DBG\]\s+\[THEME\]\s+Rendering bmp"
+    $cacheMatch = $content | Select-String -Pattern $cachePattern | Select-Object -First 1
+    if ($cacheMatch) {
+        if ($DebugMode) {
+            Write-Host "  Cover loaded from cache (Rendering bmp detected)" -ForegroundColor Cyan
+        }
+        return [PSCustomObject]@{
+            StartTime   = $null
+            EndTime     = $null
+            DurationMs  = $null
+            DurationSec = $null
+            Success     = $true
+            Found       = $true
+            FromCache   = $true
+            FailureType = $null
         }
     }
 
@@ -1405,6 +1455,21 @@ function Get-ImagesPerPage {
         }
     }
 
+    # Find all progressive JPEG decode entries (img key from preceding "Decoding JPEG:" line)
+    $progressiveImages = @()
+    $lastDecodingKey = $null
+    for ($i = 0; $i -lt $content.Count; $i++) {
+        if ($content[$i] -match "\[(\d+)\].*\[JPG\] Decoding JPEG: .+/(img_\d+_\d+)\.\w+") {
+            $lastDecodingKey = $matches[2]
+        } elseif ($content[$i] -match "\[(\d+)\].*Progressive JPEG detected" -and $lastDecodingKey) {
+            $progressiveImages += [PSCustomObject]@{
+                Timestamp = [int]$matches[1]
+                ImgKey    = $lastDecodingKey
+            }
+            $lastDecodingKey = $null
+        }
+    }
+
     $results = @()
 
     # For each rendered page, count images decoded BEFORE that page render
@@ -1444,11 +1509,21 @@ function Get-ImagesPerPage {
         }
         $pageFailedKeys = @($pageFailedSeen.Keys)
 
+        # Collect unique progressive JPEG decode keys for this page (deduplicate retries)
+        $pageProgressiveSeen = @{}
+        foreach ($prog in $progressiveImages) {
+            if ($prog.Timestamp -gt $previousPageTime -and $prog.Timestamp -lt $currentPageTime) {
+                $pageProgressiveSeen[$prog.ImgKey] = $true
+            }
+        }
+        $pageProgressiveKeys = @($pageProgressiveSeen.Keys)
+
         $results += [PSCustomObject]@{
-            PageIndex    = $i
-            ImageCount   = $imageCount
-            Images       = $pageImageKeys
-            FailedImages = $pageFailedKeys
+            PageIndex         = $i
+            ImageCount        = $imageCount
+            Images            = $pageImageKeys
+            FailedImages      = $pageFailedKeys
+            ProgressiveImages = $pageProgressiveKeys
         }
     }
 
@@ -1591,9 +1666,9 @@ function Start-AnalyzeLogs {
 
     # Check logs directory
     if (-not (Test-Path $logsDir)) {
-        Write-Host "ERROR: Logs directory not found: $logsDir" -ForegroundColor Red
+        Write-Host " ERROR: Logs directory not found: $logsDir" -ForegroundColor Red
         Write-Host ""
-        Write-Host "Press ENTER to return to menu..." -ForegroundColor Gray
+        Write-Host " Press ENTER to return to menu..." -ForegroundColor Gray
         Read-Host
         return
     }
@@ -1602,15 +1677,15 @@ function Start-AnalyzeLogs {
     $logFiles = Get-ChildItem $logsDir -Filter "*.txt" | Sort-Object LastWriteTime -Descending
 
     if ($logFiles.Count -eq 0) {
-        Write-Host "ERROR: No log files found in $logsDir" -ForegroundColor Red
+        Write-Host " ERROR: No log files found in $logsDir" -ForegroundColor Red
         Write-Host ""
-        Write-Host "Press ENTER to return to menu..." -ForegroundColor Gray
+        Write-Host " Press ENTER to return to menu..." -ForegroundColor Gray
         Read-Host
         return
     }
 
     # Parse all log files
-    Write-Host "Scanning logs..." -ForegroundColor Yellow
+    Write-Host " Scanning logs..." -ForegroundColor Yellow
 
     $parsedLogs = @()
     foreach ($logFile in $logFiles) {
@@ -1621,11 +1696,11 @@ function Start-AnalyzeLogs {
     }
 
     if ($parsedLogs.Count -eq 0) {
-        Write-Host "ERROR: No valid log files found" -ForegroundColor Red
+        Write-Host " ERROR: No valid log files found" -ForegroundColor Red
         Write-Host ""
-        Write-Host "Expected filename format: COM3_ORIGINAL_BOOKNAME.EPUB_20250313_123456.txt" -ForegroundColor Yellow
+        Write-Host " Expected filename format: COM3_ORIGINAL_BOOKNAME.EPUB_20250313_123456.txt" -ForegroundColor Yellow
         Write-Host ""
-        Write-Host "Press ENTER to return to menu..." -ForegroundColor Gray
+        Write-Host " Press ENTER to return to menu..." -ForegroundColor Gray
         Read-Host
         return
     }
@@ -1633,11 +1708,11 @@ function Start-AnalyzeLogs {
     # Group logs by timestamp (test session)
     $groupedLogs = $parsedLogs | Group-Object -Property Timestamp
 
-    Write-Host "Found $($parsedLogs.Count) log files, $($groupedLogs.Count) different test sessions" -ForegroundColor Green
+    Write-Host " Found $($parsedLogs.Count) log files, $($groupedLogs.Count) different test sessions" -ForegroundColor Green
     Write-Host ""
 
     # Display grouped logs
-    Write-Host "Logs grouped by test session (timestamp):" -ForegroundColor Cyan
+    Write-Host " Logs grouped by test session (timestamp):" -ForegroundColor Cyan
     Write-Host ""
 
     $logIndex = 0
@@ -1732,21 +1807,36 @@ function Start-AnalyzeLogs {
     }
 
     # Interactive selection (retry loop)
-    Write-Host "Select logs to compare:" -ForegroundColor Yellow
+    Write-Host " Select logs to compare:" -ForegroundColor Yellow
     Write-Host "  - Enter a session letter (e.g.: a or A) to select all logs from that session" -ForegroundColor Gray
     Write-Host "  - Enter two numbers (e.g.: 1,3) to compare specific logs" -ForegroundColor Gray
+    Write-Host "  - Enter ALL to analyze all sessions automatically (exports only, no display)" -ForegroundColor Gray
     Write-Host ""
+
+    $autoMode = $false
+    $pendingAutoSessions = [System.Collections.Queue]::new()
+    $totalAutoSessions = 0
 
     $selectedIndices = @()
     while ($selectedIndices.Count -lt 2) {
         $promptLine = [Console]::CursorTop
-        $selection = Read-Host "Selection"
+        $selection = Read-Host " Selection"
         $selection = $selection.Trim()
 
         $selectedIndices = @()
         $invalid = $false
 
-        if ($selection -match '^[a-zA-Z]$') {
+        if ($selection.ToUpper() -eq "ALL") {
+            $validLetters = $sessionMap.Keys | Sort-Object | Where-Object { $sessionMap[$_].Count -ge 2 }
+            if ($validLetters.Count -gt 0) {
+                $autoMode = $true
+                foreach ($letter in $validLetters) { $pendingAutoSessions.Enqueue($sessionMap[$letter]) }
+                $totalAutoSessions = $pendingAutoSessions.Count
+                $selectedIndices = $pendingAutoSessions.Dequeue()
+            } else {
+                $invalid = $true
+            }
+        } elseif ($selection -match '^[a-zA-Z]$') {
             if ($sessionMap.ContainsKey($selection.ToLower())) {
                 $selectedIndices = $sessionMap[$selection.ToLower()]
             } else {
@@ -1782,17 +1872,30 @@ function Start-AnalyzeLogs {
         }
     }
 
-    # Get selected logs
+    # Get selected logs — outer loop handles ALL mode (iterates through all sessions)
+    :autoLoop do {
     $selectedLogs = $selectedIndices | ForEach-Object { $logMap[$_] }
 
-    Clear-Host
+    if ($autoMode) {
+        $sessionsDone = $totalAutoSessions - $pendingAutoSessions.Count
+        [Console]::ForegroundColor = [System.ConsoleColor]::Cyan
+        [Console]::WriteLine("  [ALL $sessionsDone/$totalAutoSessions] Analyzing...")
+        [Console]::ResetColor()
+        # Override Write-Host to suppress display output — exports use file I/O, not Write-Host
+        function Write-Host {
+            param([Parameter(ValueFromPipeline=$true, ValueFromRemainingArguments=$true)]$Msg,
+                  $ForegroundColor, $BackgroundColor, [switch]$NoNewline)
+        }
+    } else {
+        Clear-Host
+    }
     Write-Host ""
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Cyan
     Write-Host "  ANALYZING SELECTED LOGS" -ForegroundColor Cyan
     Write-Host "========================================" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "Selected logs:" -ForegroundColor Green
+    Write-Host " Selected logs:" -ForegroundColor Green
     foreach ($log in $selectedLogs) {
         Write-Host "  $($log.FileName)" -ForegroundColor Gray
     }
@@ -1800,7 +1903,7 @@ function Start-AnalyzeLogs {
     Write-Host ""
 
     # Extract all data: render times, images, and cover generation
-    Write-Host "Extracting data..." -ForegroundColor Yellow
+    Write-Host " Extracting data..." -ForegroundColor Yellow
 
     $logsWithTimes = @()
     foreach ($log in $selectedLogs) {
@@ -1856,10 +1959,10 @@ function Start-AnalyzeLogs {
     Write-Host ""
 
     # IMPORTANT WARNING about image loading fairness
-    Write-WithWarning "[!] COMPARISON FAIRNESS WARNING" "Yellow"
-    Write-Host "  This analysis compares render times, but does NOT verify if all images" -ForegroundColor Yellow
-    Write-Host "  loaded successfully. A faster time may indicate MISSING or FAILED images." -ForegroundColor Yellow
-    Write-WithWarning "  Pages with missing images will be marked with '[!]' in the Winner column." "Yellow"
+    Write-WithWarning " [!] COMPARISON FAIRNESS WARNING" "Yellow"
+    Write-Host "   This analysis compares render times, but does NOT verify if all images" -ForegroundColor Yellow
+    Write-Host "   loaded successfully. A faster time may indicate MISSING or FAILED images." -ForegroundColor Yellow
+    Write-WithWarning "   Pages with missing images will be marked with '[!]' in the Winner column." "Yellow"
     Write-Host ""
     Write-Host ""
 
@@ -1867,8 +1970,8 @@ function Start-AnalyzeLogs {
     $uniqueBooks = ($selectedLogs | Select-Object -ExpandProperty BookName -Unique).Count
 
     if ($uniqueBooks -gt 1) {
-        Write-Host "WARNING: Comparing different books!" -ForegroundColor Yellow
-        Write-Host "This comparison may not be meaningful." -ForegroundColor Yellow
+        Write-Host " WARNING: Comparing different books!" -ForegroundColor Yellow
+        Write-Host " This comparison may not be meaningful." -ForegroundColor Yellow
         Write-Host ""
         Write-Host ""
     }
@@ -1888,16 +1991,16 @@ function Start-AnalyzeLogs {
         $comparisonType = "Same configuration"
     }
 
-    Write-Host "Comparison type: $comparisonType" -ForegroundColor Cyan
+    Write-Host " Comparison type: $comparisonType" -ForegroundColor Cyan
     Write-Host ""
 
     # Find minimum number of pages
     $minPages = ($logsWithTimes | ForEach-Object { $_.RenderTimes.Count } | Measure-Object -Minimum).Minimum
 
     if ($minPages -eq 0) {
-        Write-Host "ERROR: No render times found in selected logs" -ForegroundColor Red
+        Write-Host " ERROR: No render times found in selected logs" -ForegroundColor Red
         Write-Host ""
-        Write-Host "Press ENTER to return to menu..." -ForegroundColor Gray
+        Write-Host " Press ENTER to return to menu..." -ForegroundColor Gray
         Read-Host
         return
     }
@@ -2012,8 +2115,8 @@ function Start-AnalyzeLogs {
 
             # Add cover generation times (in milliseconds) using same column names
             if ($logA.CoverGenerationTime) {
-                $coverRow | Add-Member -MemberType NoteProperty -Name $colA -Value $logA.CoverGenerationTime.DurationMs -Force
-                # Add success flag as hidden property
+                $coverTimeValA = if ($logA.CoverGenerationTime.FromCache) { "cached" } else { $logA.CoverGenerationTime.DurationMs }
+                $coverRow | Add-Member -MemberType NoteProperty -Name $colA -Value $coverTimeValA -Force
                 $coverRow | Add-Member -MemberType NoteProperty -Name "${colA}_CoverSuccess" -Value $logA.CoverGenerationTime.Success -Force
             } else {
                 $coverRow | Add-Member -MemberType NoteProperty -Name $colA -Value "N/A" -Force
@@ -2021,8 +2124,8 @@ function Start-AnalyzeLogs {
             }
 
             if ($logB.CoverGenerationTime) {
-                $coverRow | Add-Member -MemberType NoteProperty -Name $colB -Value $logB.CoverGenerationTime.DurationMs -Force
-                # Add success flag as hidden property
+                $coverTimeValB = if ($logB.CoverGenerationTime.FromCache) { "cached" } else { $logB.CoverGenerationTime.DurationMs }
+                $coverRow | Add-Member -MemberType NoteProperty -Name $colB -Value $coverTimeValB -Force
                 $coverRow | Add-Member -MemberType NoteProperty -Name "${colB}_CoverSuccess" -Value $logB.CoverGenerationTime.Success -Force
             } else {
                 $coverRow | Add-Member -MemberType NoteProperty -Name $colB -Value "N/A" -Force
@@ -2037,9 +2140,9 @@ function Start-AnalyzeLogs {
 
     # Display analysis message based on whether we have cover data
     if ($hasCoverRow) {
-        Write-Host "Analyzing first $minPages pages + cover..." -ForegroundColor Yellow
+        Write-Host "  Analyzing first $minPages pages + cover..." -ForegroundColor Yellow
     } else {
-        Write-Host "Analyzing first $minPages pages..." -ForegroundColor Yellow
+        Write-Host "  Analyzing first $minPages pages..." -ForegroundColor Yellow
     }
     Write-Host ""
 
@@ -2052,6 +2155,22 @@ function Start-AnalyzeLogs {
         foreach ($row in $comparison) {
             $timeA = $row.$colA
             $timeB = $row.$colB
+            # Skip diff/percent calculation when either time is non-numeric (N/A or cached)
+            if ($timeA -eq "N/A" -or $timeA -eq "cached" -or $timeB -eq "N/A" -or $timeB -eq "cached") {
+                $row | Add-Member -MemberType NoteProperty -Name "Diff_ms" -Value "N/A" -Force
+                $row | Add-Member -MemberType NoteProperty -Name "Percent" -Value "N/A" -Force
+                $row | Add-Member -MemberType NoteProperty -Name "Winner"  -Value "N/A" -Force
+                # Still add img columns for Cover row based on CoverSuccess
+                if ($row.Page -like "*Cover*") {
+                    $csA = $row."${colA}_CoverSuccess"
+                    $csB = $row."${colB}_CoverSuccess"
+                    $dImgA = if ($csA -eq $true) { "1" } elseif ($csA -eq $false -and $logA.CoverGenerationTime -and $logA.CoverGenerationTime.FailureType -eq "decode") { "X" } elseif ($csA -eq $false) { "0" } else { "" }
+                    $dImgB = if ($csB -eq $true) { "1" } elseif ($csB -eq $false -and $logB.CoverGenerationTime -and $logB.CoverGenerationTime.FailureType -eq "decode") { "X" } elseif ($csB -eq $false) { "0" } else { "" }
+                    $row | Add-Member -MemberType NoteProperty -Name $imgColA -Value $dImgA -Force
+                    $row | Add-Member -MemberType NoteProperty -Name $imgColB -Value $dImgB -Force
+                }
+                continue
+            }
             $diff = $timeB - $timeA
             $percent = if ($timeA -gt 0) { [Math]::Round(($diff / $timeA) * 100, 1) } else { 0 }
 
@@ -2060,6 +2179,8 @@ function Start-AnalyzeLogs {
             $imagesB = 0
             $failedA = 0
             $failedB = 0
+            $progressiveA = 0
+            $progressiveB = 0
 
             if ($row.Page -is [int]) {
                 # Regular page: get images from ImagesPerPage array
@@ -2068,11 +2189,13 @@ function Start-AnalyzeLogs {
                 if ($pageIndex -lt $logA.ImagesPerPage.Count) {
                     $imagesA = $logA.ImagesPerPage[$pageIndex].ImageCount
                     $failedA = $logA.ImagesPerPage[$pageIndex].FailedImages.Count
+                    $progressiveA = $logA.ImagesPerPage[$pageIndex].ProgressiveImages.Count
                 }
 
                 if ($pageIndex -lt $logB.ImagesPerPage.Count) {
                     $imagesB = $logB.ImagesPerPage[$pageIndex].ImageCount
                     $failedB = $logB.ImagesPerPage[$pageIndex].FailedImages.Count
+                    $progressiveB = $logB.ImagesPerPage[$pageIndex].ProgressiveImages.Count
                 }
             } elseif ($row.Page -like "*Cover*") {
                 # Cover row (handles both "Cover" and "Cover [!]")
@@ -2247,6 +2370,15 @@ function Start-AnalyzeLogs {
                 $winner = "$winner [X]"
             }
 
+            # Add [-] if winner had progressive JPEG (lower quality) decodes on this page
+            if ($winner -ne "TIE" -and -not $winner.Contains(" [X]") -and -not $winner.Contains(" [!]")) {
+                $winnerHadProgressive = ($winner -like "*$winnerA*" -and $progressiveA -gt 0) -or
+                                        ($winner -like "*$winnerB*" -and $progressiveB -gt 0)
+                if ($winnerHadProgressive) {
+                    $winner = "$winner [-]"
+                }
+            }
+
             # Display value: show "X" (red) when decode failed and success count is 0
             $displayImgA = if ($imagesA -eq 0 -and $failedA -gt 0) { "X" } else { [string]$imagesA }
             $displayImgB = if ($imagesB -eq 0 -and $failedB -gt 0) { "X" } else { [string]$imagesB }
@@ -2262,7 +2394,7 @@ function Start-AnalyzeLogs {
     }
 
     # Display comparison table
-    Write-Host "Render Time Comparison:" -ForegroundColor Cyan
+    Write-Host " Render Time Comparison:" -ForegroundColor Cyan
     Write-Host ""
 
     # Add comparison title for 2-log comparisons
@@ -2272,16 +2404,16 @@ function Start-AnalyzeLogs {
 
         # Determine comparison title (display names reuse $shortNameA/B)
         if ($uniqueTypes -gt 1) {
-            $comparisonTitle = "Book Version"
+            $comparisonTitle = " Book Version"
         } elseif ($uniquePorts -eq 1 -and $uniqueTypes -eq 1) {
-            $comparisonTitle = "Same Device Repeatability Test"
+            $comparisonTitle = " Same Device Repeatability Test"
         } else {
-            $comparisonTitle = "Device Performance"
+            $comparisonTitle = " Device Performance"
         }
         $displayNameA = $shortNameA
         $displayNameB = $shortNameB
 
-        Write-Host "${comparisonTitle}: " -ForegroundColor Yellow -NoNewline
+        Write-Host " ${comparisonTitle}: " -ForegroundColor Yellow -NoNewline
         Write-Host "${displayNameA} (A)" -ForegroundColor Blue -NoNewline
         Write-Host " vs " -ForegroundColor Yellow -NoNewline
         Write-Host "${displayNameB} (B)" -ForegroundColor Green -NoNewline
@@ -2292,7 +2424,7 @@ function Start-AnalyzeLogs {
     # Display table with color coding
     if ($comparison.Count -gt 0 -and $logsWithTimes.Count -eq 2) {
         # Build ordered properties
-        $allProperties = $comparison[0].PSObject.Properties.Name
+        $allProperties = ($comparison | ForEach-Object { $_.PSObject.Properties.Name } | Select-Object -Unique)
         $imageCols = $allProperties | Where-Object { ($_ -like "Images_*" -or $_ -like "*_img") -and $_ -notlike "*CoverSuccess" }
         $orderedProperties = @("Page", $colA, $colB) + $imageCols + @("Diff_ms", "Percent", "Winner")
 
@@ -2333,6 +2465,7 @@ function Start-AnalyzeLogs {
         $headerDisplay = @{ $colA = "A"; $colB = "B"; "Diff_ms" = "Diff" }
 
         # Print header row
+        Write-Host " " -NoNewline
         foreach ($prop in $orderedProperties) {
             $color = if ($prop -eq $colA -or $prop -eq $imgColA) { "Blue" }
                      elseif ($prop -eq $colB -or $prop -eq $imgColB) { "Green" }
@@ -2346,6 +2479,7 @@ function Start-AnalyzeLogs {
         Write-Host ""
 
         # Print separator
+        Write-Host " " -NoNewline
         foreach ($prop in $orderedProperties) {
             $w = $colWidths[$prop]
             $fmt = if ($rightAlignedCols -contains $prop) { "{0,$w}" } else { "{0,-$w}" }
@@ -2356,21 +2490,22 @@ function Start-AnalyzeLogs {
 
         # Print data rows
         foreach ($row in $comparison) {
+            Write-Host " " -NoNewline
             foreach ($prop in $orderedProperties) {
                 $pv = $row.PSObject.Properties[$prop]
                 $strVal = if ($null -ne $pv -and $null -ne $pv.Value) { $pv.Value.ToString() } else { "" }
-                if ($msCols -contains $prop -and $strVal -ne "") { $strVal = "${strVal} ms" }
+                if ($msCols -contains $prop -and $strVal -ne "" -and $strVal -ne "N/A" -and $strVal -ne "cached") { $strVal = "${strVal} ms" }
                 $hasR = ($prop -eq $colA -and $row.PSObject.Properties["A_HasRefresh"] -and $row.A_HasRefresh) -or
                         ($prop -eq $colB -and $row.PSObject.Properties["B_HasRefresh"] -and $row.B_HasRefresh)
                 $width = $colWidths[$prop]
                 $fmt = if ($rightAlignedCols -contains $prop) { "{0,$width}" } else { "{0,-$width}" }
 
                 if ($prop -eq $colA -or $prop -eq $imgColA) {
-                    $color = if ($strVal -eq "X") { "Red" } else { "Blue" }
+                    $color = if ($strVal -eq "X") { "Red" } elseif ($strVal -eq "cached" -or $strVal -eq "N/A") { "DarkGray" } else { "Blue" }
                 } elseif ($prop -eq $colB -or $prop -eq $imgColB) {
-                    $color = if ($strVal -eq "X") { "Red" } else { "Green" }
+                    $color = if ($strVal -eq "X") { "Red" } elseif ($strVal -eq "cached" -or $strVal -eq "N/A") { "DarkGray" } else { "Green" }
                 } elseif ($prop -eq "Winner") {
-                    $bare = $strVal -replace " \[!\]", "" -replace " \[~\]", "" -replace " \[X\]", ""
+                    $bare = $strVal -replace " \[!\]", "" -replace " \[~\]", "" -replace " \[X\]", "" -replace " \[-\]", "" -replace " \[-\]", ""
                     $color = if ($bare -eq "TIE") { "Gray" }
                              elseif ($bare -eq $winnerA) { "Blue" }
                              elseif ($bare -eq $winnerB) { "Green" }
@@ -2418,6 +2553,14 @@ function Start-AnalyzeLogs {
                     Write-Host $baseVal -NoNewline -ForegroundColor $color
                     Write-Host $marker -NoNewline -ForegroundColor Yellow
                     if ($pad -gt 0) { Write-Host (" " * $pad) -NoNewline }
+                } elseif ($strVal.Contains(" [-]")) {
+                    $baseVal = $strVal -replace " \[-\]", ""
+                    $marker = " [-]"
+                    $fullWidth = ($fmt -f $strVal).Length
+                    $pad = $fullWidth - $baseVal.Length - $marker.Length
+                    Write-Host $baseVal -NoNewline -ForegroundColor $color
+                    Write-Host $marker -NoNewline -ForegroundColor Yellow
+                    if ($pad -gt 0) { Write-Host (" " * $pad) -NoNewline }
                 } elseif ($hasR) {
                     $marker = "[R] "
                     $valueFmt = if ($rightAlignedCols -contains $prop) { "{0,$($width - $marker.Length)}" } else { "{0,-$($width - $marker.Length)}" }
@@ -2440,7 +2583,7 @@ function Start-AnalyzeLogs {
 
         # Column legend
         Write-Host ""
-        Write-Host "Legend:" -ForegroundColor Cyan
+        Write-Host " Legend:" -ForegroundColor Cyan
         if ($useAliases) {
             $legendW = "TIE".Length  # = 3
             Write-Host "  - $("A".PadRight($legendW)): ${displayNameA} is faster" -ForegroundColor Blue
@@ -2451,13 +2594,16 @@ function Start-AnalyzeLogs {
             Write-Host "  - $("Test2".PadRight($legendW)): ${displayNameB} is faster" -ForegroundColor Green
         }
         Write-Host "  - TIE: When the difference is < 1% (statistically insignificant)" -ForegroundColor Gray
-        Write-Host "  -----" -ForegroundColor DarkGray
+        Write-Host "  Flags:" -ForegroundColor DarkGray
         Write-Host "  - " -NoNewline -ForegroundColor Gray
         Write-Host "[X]" -NoNewline -ForegroundColor Red
         Write-Host ": Decode failure - image was attempted but failed to decode (more work, no result)" -ForegroundColor Gray
         Write-Host "  - " -NoNewline -ForegroundColor Gray
         Write-WithWarning "[!]" "Red" -NoNewline
-        Write-Host ": Missing image - one version is entirely missing an illustration" -ForegroundColor Gray
+        Write-Host ": Missing image - one version is entirely missing a picture" -ForegroundColor Gray
+        Write-Host "  - " -NoNewline -ForegroundColor Gray
+        Write-Host "[-]" -NoNewline -ForegroundColor Yellow
+        Write-Host ": Lower quality - image decoded as progressive JPEG (DC coefficients only, reduced quality)" -ForegroundColor Gray
         Write-Host "  - " -NoNewline -ForegroundColor Gray
         Write-Host "[~]" -NoNewline -ForegroundColor Yellow
         Write-Host ": Page offset - same image present in both versions but on different pages" -ForegroundColor Gray
@@ -2471,7 +2617,7 @@ function Start-AnalyzeLogs {
 
         $aWins = 0; $bWins = 0; $ties = 0
         foreach ($row in $comparison) {
-            $bareWinner = $row.Winner -replace " \[!\]", "" -replace " \[~\]", "" -replace " \[X\]", ""
+            $bareWinner = $row.Winner -replace " \[!\]", "" -replace " \[~\]", "" -replace " \[X\]", "" -replace " \[-\]", ""
             if ($bareWinner -eq $winnerA) { $aWins++ }
             elseif ($bareWinner -eq $winnerB) { $bWins++ }
             elseif ($bareWinner -eq "TIE") { $ties++ }
@@ -2716,7 +2862,7 @@ function Start-AnalyzeLogs {
         if (($covSuccessA + $covFailedA) -gt 0) {
             $coverRow2 = $comparison | Where-Object { $_.Page -like "*Cover*" } | Select-Object -First 1
             if ($coverRow2) {
-                $covRowWinner = $coverRow2.Winner -replace " \[!\]", "" -replace " \[~\]", "" -replace " \[X\]", ""
+                $covRowWinner = $coverRow2.Winner -replace " \[!\]", "" -replace " \[~\]", "" -replace " \[X\]", "" -replace " \[-\]", ""
                 if ($covRowWinner -eq $winnerA -and $covSuccessA -eq 0) {
                     $coverWinnerFailed = $true; $covWinnerLabel = $shortNameA; $covWinnerColor = "Blue"
                 } elseif ($covRowWinner -eq $winnerB -and $covSuccessB -eq 0) {
@@ -2728,15 +2874,17 @@ function Start-AnalyzeLogs {
         # Per-page: categorise by which marker the winning side carries
         $xWinPages     = @($comparison | Where-Object { $_.Page -notlike "*Cover*" -and $_.Winner -like "*[X]*" })
         $exclWinPages  = @($comparison | Where-Object { $_.Page -notlike "*Cover*" -and $_.Winner -like "*[!]*" })
-        $tildeWinPages = @($comparison | Where-Object { $_.Page -notlike "*Cover*" -and $_.Winner -like "*[~]*" })
+        $tildeWinPages = @($comparison | Where-Object { $_.Page -notlike "*Cover*" -and $_.Winner.Contains(" [~]") })
+        $dashWinPages  = @($comparison | Where-Object { $_.Page -notlike "*Cover*" -and $_.Winner.Contains(" [-]") })
 
         $hasUnfairWin = $coverWinnerFailed -or
                         $xWinPages.Count -gt 0 -or
                         $exclWinPages.Count -gt 0 -or
-                        $tildeWinPages.Count -gt 0
+                        $tildeWinPages.Count -gt 0 -or
+                        $dashWinPages.Count -gt 0
 
         if ($hasUnfairWin) {
-            Write-Host "UNFAIR COMPARISONS DETECTED:" -ForegroundColor Red
+            Write-Host " UNFAIR COMPARISONS DETECTED:" -ForegroundColor Red
 
             if ($coverWinnerFailed) {
                 Write-Host "  Cover: winner (" -NoNewline -ForegroundColor Yellow
@@ -2746,10 +2894,10 @@ function Start-AnalyzeLogs {
             if ($xWinPages.Count -gt 0) {
                 Write-Host "  " -NoNewline
                 Write-Host "[X]" -NoNewline -ForegroundColor Red
-                Write-Host " Winner failed to decode/render image" -ForegroundColor Yellow
+                Write-Host " Page winner failed to decode/render image" -ForegroundColor Yellow
                 $xByWinner = @{}
                 foreach ($p in $xWinPages) {
-                    $bareW = $p.Winner -replace " \[!\]","" -replace " \[~\]","" -replace " \[X\]",""
+                    $bareW = $p.Winner -replace " \[!\]","" -replace " \[~\]","" -replace " \[X\]","" -replace " \[-\]",""
                     $winnerLabel = if ($bareW -eq $winnerA) { $shortNameA } elseif ($bareW -eq $winnerB) { $shortNameB } else { $bareW }
                     $pageNum = $p.Page -replace " \[X\]","" -replace " \[!\]","" -replace " \[~\]",""
                     if (-not $xByWinner.ContainsKey($winnerLabel)) { $xByWinner[$winnerLabel] = @() }
@@ -2758,18 +2906,18 @@ function Start-AnalyzeLogs {
                 foreach ($wLabel in $xByWinner.Keys) {
                     $wColor = if ($wLabel -eq $shortNameA) { "Blue" } else { "Green" }
                     $pageList = $xByWinner[$wLabel] -join ", "
-                    Write-Host "      Winner " -NoNewline -ForegroundColor Yellow
+                    Write-Host "      " -NoNewline -ForegroundColor Yellow
                     Write-Host $wLabel -NoNewline -ForegroundColor $wColor
-                    Write-Host " failed: pages $pageList" -ForegroundColor Yellow
+                    Write-Host " faster, but failed: pages $pageList" -ForegroundColor Yellow
                 }
             }
             if ($exclWinPages.Count -gt 0) {
                 Write-Host "  " -NoNewline
                 Write-WithWarning "[!]" "Red" -NoNewline
-                Write-Host " Winner is missing an image entirely" -ForegroundColor Yellow
+                Write-Host " Page winner is missing an image entirely" -ForegroundColor Yellow
                 $exclByWinner = @{}
                 foreach ($p in $exclWinPages) {
-                    $bareW = $p.Winner -replace " \[!\]","" -replace " \[~\]","" -replace " \[X\]",""
+                    $bareW = $p.Winner -replace " \[!\]","" -replace " \[~\]","" -replace " \[X\]","" -replace " \[-\]",""
                     $winnerLabel = if ($bareW -eq $winnerA) { $shortNameA } elseif ($bareW -eq $winnerB) { $shortNameB } else { $bareW }
                     $pageNum = $p.Page -replace " \[X\]","" -replace " \[!\]","" -replace " \[~\]",""
                     if (-not $exclByWinner.ContainsKey($winnerLabel)) { $exclByWinner[$winnerLabel] = @() }
@@ -2778,18 +2926,18 @@ function Start-AnalyzeLogs {
                 foreach ($wLabel in $exclByWinner.Keys) {
                     $wColor = if ($wLabel -eq $shortNameA) { "Blue" } else { "Green" }
                     $pageList = $exclByWinner[$wLabel] -join ", "
-                    Write-Host "      Winner " -NoNewline -ForegroundColor Yellow
+                    Write-Host "      " -NoNewline -ForegroundColor Yellow
                     Write-Host $wLabel -NoNewline -ForegroundColor $wColor
-                    Write-Host " failed: pages $pageList" -ForegroundColor Yellow
+                    Write-Host " faster, but missing image: pages $pageList" -ForegroundColor Yellow
                 }
             }
             if ($tildeWinPages.Count -gt 0) {
                 Write-Host "  " -NoNewline
                 Write-Host "[~]" -NoNewline -ForegroundColor Yellow
-                Write-Host " Winner rendered image on a different page" -ForegroundColor Yellow
+                Write-Host " Page winner rendered image on a different page" -ForegroundColor Yellow
                 $tildeByWinner = @{}
                 foreach ($p in $tildeWinPages) {
-                    $bareW = $p.Winner -replace " \[!\]","" -replace " \[~\]","" -replace " \[X\]",""
+                    $bareW = $p.Winner -replace " \[!\]","" -replace " \[~\]","" -replace " \[X\]","" -replace " \[-\]",""
                     $winnerLabel = if ($bareW -eq $winnerA) { $shortNameA } elseif ($bareW -eq $winnerB) { $shortNameB } else { $bareW }
                     $pageNum = $p.Page -replace " \[X\]","" -replace " \[!\]","" -replace " \[~\]",""
                     if (-not $tildeByWinner.ContainsKey($winnerLabel)) { $tildeByWinner[$winnerLabel] = @() }
@@ -2798,9 +2946,29 @@ function Start-AnalyzeLogs {
                 foreach ($wLabel in $tildeByWinner.Keys) {
                     $wColor = if ($wLabel -eq $shortNameA) { "Blue" } else { "Green" }
                     $pageList = $tildeByWinner[$wLabel] -join ", "
-                    Write-Host "      Winner " -NoNewline -ForegroundColor Yellow
+                    Write-Host "      " -NoNewline -ForegroundColor Yellow
                     Write-Host $wLabel -NoNewline -ForegroundColor $wColor
-                    Write-Host " offset: pages $pageList" -ForegroundColor Yellow
+                    Write-Host " faster, but offset: pages $pageList" -ForegroundColor Yellow
+                }
+            }
+            if ($dashWinPages.Count -gt 0) {
+                Write-Host "  " -NoNewline
+                Write-Host "[-]" -NoNewline -ForegroundColor Yellow
+                Write-Host " Page winner rendered image in lower quality (progressive JPEG)" -ForegroundColor Yellow
+                $dashByWinner = @{}
+                foreach ($p in $dashWinPages) {
+                    $bareW = $p.Winner -replace " \[!\]","" -replace " \[~\]","" -replace " \[X\]","" -replace " \[-\]",""
+                    $winnerLabel = if ($bareW -eq $winnerA) { $shortNameA } elseif ($bareW -eq $winnerB) { $shortNameB } else { $bareW }
+                    $pageNum = $p.Page -replace " \[X\]","" -replace " \[!\]","" -replace " \[~\]",""
+                    if (-not $dashByWinner.ContainsKey($winnerLabel)) { $dashByWinner[$winnerLabel] = @() }
+                    $dashByWinner[$winnerLabel] += $pageNum.Trim()
+                }
+                foreach ($wLabel in $dashByWinner.Keys) {
+                    $wColor = if ($wLabel -eq $shortNameA) { "Blue" } else { "Green" }
+                    $pageList = $dashByWinner[$wLabel] -join ", "
+                    Write-Host "      " -NoNewline -ForegroundColor Yellow
+                    Write-Host $wLabel -NoNewline -ForegroundColor $wColor
+                    Write-Host " faster, but lower quality: pages $pageList" -ForegroundColor Yellow
                 }
             }
             Write-Host ""
@@ -2894,14 +3062,14 @@ function Start-AnalyzeLogs {
         }
 
         if ($hasUnfairWin) {
-            Write-Host "Pages marked above may not represent true performance - winner did less rendering work!" -ForegroundColor Red
+            Write-Host " Pages marked above may not represent true performance - winner did less rendering work!" -ForegroundColor Red
             Write-Host ""
             Write-Host ""
         }
 
-        # Comparative averages
-        $avgA = ($comparison | ForEach-Object { $_.$colA } | Measure-Object -Average).Average
-        $avgB = ($comparison | ForEach-Object { $_.$colB } | Measure-Object -Average).Average
+        # Comparative averages (exclude N/A rows such as cover loaded from cache)
+        $avgA = ($comparison | ForEach-Object { $_.$colA } | Where-Object { $_ -ne "N/A" -and $_ -ne "cached" -and $null -ne $_ } | Measure-Object -Average).Average
+        $avgB = ($comparison | ForEach-Object { $_.$colB } | Where-Object { $_ -ne "N/A" -and $_ -ne "cached" -and $null -ne $_ } | Measure-Object -Average).Average
         $avgDiff = $avgA - $avgB
         $avgPercent = if ($avgA -gt 0) { [Math]::Round(($avgDiff / $avgA) * 100, 1) } else { 0 }
 
@@ -2913,7 +3081,7 @@ function Start-AnalyzeLogs {
         $avgASStr = "$([Math]::Round($avgA / 1000, 2))s"
         $avgBSStr = "$([Math]::Round($avgB / 1000, 2))s"
         $avgSWidth = [Math]::Max($avgASStr.Length, $avgBSStr.Length)
-        Write-Host "Average render time per page:" -ForegroundColor Cyan
+        Write-Host " Average render time per page:" -ForegroundColor Cyan
         Write-Host "  $($shortNameA.PadRight($avgLabelWidth)): $($avgASStr.PadLeft($avgSWidth)) ($($avgAStr.PadLeft($avgNumWidth)) ms)" -ForegroundColor Blue
         Write-Host "  $($shortNameB.PadRight($avgLabelWidth)): $($avgBSStr.PadLeft($avgSWidth)) ($($avgBStr.PadLeft($avgNumWidth)) ms)" -ForegroundColor Green
         Write-Host ""
@@ -2923,7 +3091,7 @@ function Start-AnalyzeLogs {
 
         # [!] if the overall winner has any unfair pages
         $resultWinner = if ($avgDiff -lt 0) { $winnerA } else { $winnerB }
-        $resultHasUnfair = $pagesWithWarnings | Where-Object { ($_.Winner -replace " \[!\]", "" -replace " \[X\]", "") -eq $resultWinner }
+        $resultHasUnfair = $pagesWithWarnings | Where-Object { ($_.Winner -replace " \[!\]", "" -replace " \[X\]", "" -replace " \[-\]", "") -eq $resultWinner }
         $resultWarning = if ($resultHasUnfair) { " [!]" } else { "" }
 
         $avgDiffS = [Math]::Round([Math]::Abs($avgDiff) / 1000, 2)
@@ -2943,12 +3111,12 @@ function Start-AnalyzeLogs {
 
     # Extended Statistics
     Write-Host ""
-    Write-Host "Extended Statistics:" -ForegroundColor Cyan
+    Write-Host " Extended Statistics:" -ForegroundColor Cyan
 
     if ($logsWithTimes.Count -eq 2) {
-        # Two-log comparison: show side-by-side table
-        $timesA = $comparison | ForEach-Object { $_.$colA }
-        $timesB = $comparison | ForEach-Object { $_.$colB }
+        # Two-log comparison: show side-by-side table (exclude N/A rows e.g. cover from cache)
+        $timesA = @($comparison | ForEach-Object { $_.$colA } | Where-Object { $_ -ne "N/A" -and $_ -ne "cached" -and $null -ne $_ })
+        $timesB = @($comparison | ForEach-Object { $_.$colB } | Where-Object { $_ -ne "N/A" -and $_ -ne "cached" -and $null -ne $_ })
 
         $avgA = ($timesA | Measure-Object -Average).Average
         $minA = ($timesA | Measure-Object -Minimum).Minimum
@@ -2988,13 +3156,13 @@ function Start-AnalyzeLogs {
 
         # Metrics
         $metrics = @(
-            @{Label = "Min"; ValueA = $minA; ValueB = $minB},
-            @{Label = "Max"; ValueA = $maxA; ValueB = $maxB},
-            @{Label = "Avg"; ValueA = $avgA; ValueB = $avgB},
-            @{Label = "Median"; ValueA = $medianA; ValueB = $medianB},
-            @{Label = "Std Dev"; ValueA = $stdDevA; ValueB = $stdDevB},
-            @{Label = "P95"; ValueA = $p95A; ValueB = $p95B},
-            @{Label = "P99"; ValueA = $p99A; ValueB = $p99B}
+            @{Label = " Min"; ValueA = $minA; ValueB = $minB},
+            @{Label = " Max"; ValueA = $maxA; ValueB = $maxB},
+            @{Label = " Avg"; ValueA = $avgA; ValueB = $avgB},
+            @{Label = " Median"; ValueA = $medianA; ValueB = $medianB},
+            @{Label = " Std Dev"; ValueA = $stdDevA; ValueB = $stdDevB},
+            @{Label = " P95"; ValueA = $p95A; ValueB = $p95B},
+            @{Label = " P99"; ValueA = $p99A; ValueB = $p99B}
         )
 
         foreach ($metric in $metrics) {
@@ -3007,8 +3175,8 @@ function Start-AnalyzeLogs {
 
     # Consistency Analysis (for 2-log comparisons only)
     if ($logsWithTimes.Count -eq 2) {
-        $timesA = $comparison | ForEach-Object { $_.$colA }
-        $timesB = $comparison | ForEach-Object { $_.$colB }
+        $timesA = @($comparison | ForEach-Object { $_.$colA } | Where-Object { $_ -ne "N/A" -and $_ -ne "cached" -and $null -ne $_ })
+        $timesB = @($comparison | ForEach-Object { $_.$colB } | Where-Object { $_ -ne "N/A" -and $_ -ne "cached" -and $null -ne $_ })
         $avgA = ($timesA | Measure-Object -Average).Average
         $avgB = ($timesB | Measure-Object -Average).Average
 
@@ -3025,7 +3193,7 @@ function Start-AnalyzeLogs {
         $cvLabelWidth = [Math]::Max($consistencyNameA.Length, $consistencyNameB.Length)
 
         Write-Host ""
-        Write-Host "Consistency Analysis:" -ForegroundColor Cyan
+        Write-Host " Consistency Analysis:" -ForegroundColor Cyan
         $cvColorA = if ($cvA -lt $cvB) { "Green" } elseif ($cvA -eq $cvB) { "Yellow" } else { "Red" }
         $cvColorB = if ($cvB -lt $cvA) { "Green" } elseif ($cvB -eq $cvA) { "Yellow" } else { "Red" }
         Write-Host "  $($consistencyNameA.PadRight($cvLabelWidth)): Coef. of Variation = $([Math]::Round($cvA, 1))%" -ForegroundColor $cvColorA
@@ -3041,8 +3209,10 @@ function Start-AnalyzeLogs {
             $sectionTitle = "Optimization Impact"
 
             # Diff = B - A: most negative = B improved most, most positive = B regressed most
-            $mostImproved  = $comparison | Sort-Object -Property Diff_ms           | Select-Object -First 1
-            $leastImproved = $comparison | Sort-Object -Property Diff_ms -Descending | Select-Object -First 1
+            # Exclude N/A rows (e.g. cover loaded from cache) from best/worst selection
+            $numericComparison = @($comparison | Where-Object { $_.Diff_ms -ne "N/A" -and $_.Diff_ms -ne "cached" -and $null -ne $_.Diff_ms })
+            $mostImproved  = $numericComparison | Sort-Object -Property Diff_ms           | Select-Object -First 1
+            $leastImproved = $numericComparison | Sort-Object -Property Diff_ms -Descending | Select-Object -First 1
 
             # Extract numeric percentage from string (e.g., "-92.6%" -> -92.6)
             $mostImprovedPercent  = [double]($mostImproved.Percent  -replace '%', '')
@@ -3051,7 +3221,7 @@ function Start-AnalyzeLogs {
             # Positive diff = A won = B got worse
             $gotWorse = $leastImproved.Diff_ms -gt 0
 
-            Write-Host "${sectionTitle}:" -ForegroundColor Cyan
+            Write-Host " ${sectionTitle}:" -ForegroundColor Cyan
 
             # Determine if [!] is misleading: winner did less work (failed cover or fewer images)
             # Most improved: B won (most negative diff)
@@ -3072,38 +3242,56 @@ function Start-AnalyzeLogs {
                 $leastIsMisleading = $leastAImg -lt $leastBImg
             }
 
-            $impactLabelW = "Least improved".Length  # = 14, widest label
+            # Helper: resolve flag token + color + reason from a Winner string
+            function Get-WinnerFlagInfo($winnerStr) {
+                if ($winnerStr.Contains(" [X]")) { return @{ Token = "[X]"; Color = "Red";    Reason = "decode failure"    } }
+                if ($winnerStr.Contains(" [-]")) { return @{ Token = "[-]"; Color = "Yellow"; Reason = "progressive JPEG" } }
+                return                                    @{ Token = "[!]"; Color = "Red";    Reason = "missing image"     }
+            }
 
             # Most improved: B had the most negative diff
-            $pageDisplay = if ($mostImproved.Page -like "Cover*") { $mostImproved.Page } else { "Page $($mostImproved.Page)" }
+            # Page label is always clean. End marker + winner name + reason only if WINNER (B) had the flag.
+            $pageDisplay = if ($mostImproved.Page -like "Cover*") { "Cover" } else { "Page $($mostImproved.Page -replace ' \[X\]','' -replace ' \[!\]','' -replace ' \[-\]','')" }
             if ([Math]::Abs($mostImprovedPercent) -gt 1) {
-                $warningText = if ($mostIsMisleading) { " [!]" } else { "" }
-                Write-WithWarning "  $("Most improved".PadRight($impactLabelW)): $pageDisplay ($displayNameB) is $([Math]::Abs($mostImproved.Diff_ms)) ms faster ($($mostImproved.Percent))$warningText" "Green"
+                Write-WithWarning "  Most improved: $pageDisplay - $displayNameB is $([Math]::Abs($mostImproved.Diff_ms)) ms faster ($($mostImproved.Percent))" "Green" -NoNewline
+                if ($mostIsMisleading) {
+                    $fi = Get-WinnerFlagInfo $mostImproved.Winner
+                    Write-Host " - " -NoNewline -ForegroundColor Green
+                    Write-Host $fi.Token -NoNewline -ForegroundColor $fi.Color
+                    Write-Host " $displayNameB faster ($($fi.Reason))" -ForegroundColor Green
+                } else { Write-Host "" }
             } else {
-                Write-Host "  $("Most improved".PadRight($impactLabelW)): $pageDisplay ($displayNameB) is $([Math]::Abs($mostImproved.Diff_ms)) ms faster ($($mostImproved.Percent)) - statistically insignificant" -ForegroundColor Gray
+                Write-Host "  Most improved: $pageDisplay - $displayNameB is $([Math]::Abs($mostImproved.Diff_ms)) ms faster ($($mostImproved.Percent)) - statistically insignificant" -ForegroundColor Gray
             }
 
             # Worst case for B: regression or least improved
-            $pageDisplay = if ($leastImproved.Page -like "Cover*") { $leastImproved.Page } else { "Page $($leastImproved.Page)" }
+            # Page label is always clean. End marker + winner name + reason only if WINNER (A) had the flag.
+            $pageDisplay = if ($leastImproved.Page -like "Cover*") { "Cover" } else { "Page $($leastImproved.Page -replace ' \[X\]','' -replace ' \[!\]','' -replace ' \[-\]','')" }
             $regressionHasRefresh = $leastImproved.PSObject.Properties["B_HasRefresh"] -and $leastImproved.B_HasRefresh
             if ($gotWorse -and $leastImprovedPercent -gt 1) {
-                $warningText = if ($leastIsMisleading) { " [!]" } else { "" }
-                Write-WithWarning "  $("Regression".PadRight($impactLabelW)): $pageDisplay ($displayNameB) is $($leastImproved.Diff_ms) ms SLOWER ($($leastImproved.Percent))$warningText" "Red" -NoNewline
+                Write-WithWarning "  Regression: $pageDisplay - $displayNameB is $($leastImproved.Diff_ms) ms SLOWER ($($leastImproved.Percent))" "Red" -NoNewline
+                if ($leastIsMisleading) {
+                    $fi = Get-WinnerFlagInfo $leastImproved.Winner
+                    Write-Host " - " -NoNewline -ForegroundColor Red
+                    Write-Host $fi.Token -NoNewline -ForegroundColor $fi.Color
+                    Write-Host " $displayNameA faster ($($fi.Reason))" -NoNewline -ForegroundColor Red
+                }
                 if ($regressionHasRefresh) { Write-Host " [R]" -ForegroundColor Cyan } else { Write-Host "" }
             } elseif ($gotWorse) {
-                Write-Host "  $("Regression".PadRight($impactLabelW)): $pageDisplay ($displayNameB) is $($leastImproved.Diff_ms) ms slower ($($leastImproved.Percent)) - statistically insignificant" -ForegroundColor Gray
+                Write-Host "  Regression: $pageDisplay - $displayNameB is $($leastImproved.Diff_ms) ms slower ($($leastImproved.Percent)) - statistically insignificant" -ForegroundColor Gray
             } else {
-                Write-Host "  $("Least improved".PadRight($impactLabelW)): $pageDisplay ($displayNameB) is only $([Math]::Abs($leastImproved.Diff_ms)) ms faster ($($leastImproved.Percent))" -ForegroundColor Yellow
+                Write-Host "  Least improved: $pageDisplay - $displayNameB is only $([Math]::Abs($leastImproved.Diff_ms)) ms faster ($($leastImproved.Percent))" -ForegroundColor Yellow
             }
         } else {
             # Same book type: Device comparison
             $sectionTitle = "Performance Highlights"
 
-            # Traditional best/worst based on pure difference
-            $bestCase = $comparison | Sort-Object -Property Diff_ms | Select-Object -First 1
-            $worstCase = $comparison | Sort-Object -Property Diff_ms -Descending | Select-Object -First 1
+            # Traditional best/worst based on pure difference (exclude N/A rows)
+            $numericComparison = @($comparison | Where-Object { $_.Diff_ms -ne "N/A" -and $_.Diff_ms -ne "cached" -and $null -ne $_.Diff_ms })
+            $bestCase = $numericComparison | Sort-Object -Property Diff_ms | Select-Object -First 1
+            $worstCase = $numericComparison | Sort-Object -Property Diff_ms -Descending | Select-Object -First 1
 
-            Write-Host "${sectionTitle}:" -ForegroundColor Cyan
+            Write-Host " ${sectionTitle}:" -ForegroundColor Cyan
 
             # Check for warnings
             $bestCaseHasWarning = $bestCase.Winner -like "*[!]*"
@@ -3112,8 +3300,8 @@ function Start-AnalyzeLogs {
             $bestWarningText = if ($bestCaseHasWarning) { " [!]" } else { "" }
             $worstWarningText = if ($worstCaseHasWarning) { " [!]" } else { "" }
 
-            Write-WithWarning "  Best performer:  Page $($bestCase.Page) ($displayNameA) faster by $($bestCase.Diff_ms) ms ($($bestCase.Percent))$bestWarningText" "Green"
-            Write-WithWarning "  Worst performer: Page $($worstCase.Page) ($displayNameB) faster by $($worstCase.Diff_ms) ms ($($worstCase.Percent))$worstWarningText" $(if ([Math]::Abs($worstCase.Diff_ms) -gt 1000) { "Red" } else { "Yellow" })
+            Write-WithWarning "  Best performer: Page $($bestCase.Page) - $displayNameA faster by $($bestCase.Diff_ms) ms ($($bestCase.Percent))$bestWarningText" "Green"
+            Write-WithWarning "  Worst performer: Page $($worstCase.Page) - $displayNameB faster by $($worstCase.Diff_ms) ms ($($worstCase.Percent))$worstWarningText" $(if ([Math]::Abs($worstCase.Diff_ms) -gt 1000) { "Red" } else { "Yellow" })
 
             # Show warning if any highlighted page has issues
             if ($bestCaseHasWarning -or $worstCaseHasWarning) {
@@ -3125,8 +3313,8 @@ function Start-AnalyzeLogs {
 
     # Total Performance (for 2-log comparisons only)
     if ($logsWithTimes.Count -eq 2) {
-        $timesA = $comparison | ForEach-Object { $_.$colA }
-        $timesB = $comparison | ForEach-Object { $_.$colB }
+        $timesA = @($comparison | ForEach-Object { $_.$colA } | Where-Object { $_ -ne "N/A" -and $_ -ne "cached" -and $null -ne $_ })
+        $timesB = @($comparison | ForEach-Object { $_.$colB } | Where-Object { $_ -ne "N/A" -and $_ -ne "cached" -and $null -ne $_ })
 
         $totalTimeA = ($timesA | Measure-Object -Sum).Sum
         $totalTimeB = ($timesB | Measure-Object -Sum).Sum
@@ -3150,7 +3338,7 @@ function Start-AnalyzeLogs {
         $hasUnfairComparisonInOptimization = $false
         $pagesWithWarnings = $comparison | Where-Object { $_.Winner -like "*[!]*" -or $_.Winner -like "*[X]*" }
         foreach ($wPage in $pagesWithWarnings) {
-            $pageWinner = ($wPage.Winner -replace " \[!\]", "" -replace " \[X\]", "")
+            $pageWinner = ($wPage.Winner -replace " \[!\]", "" -replace " \[X\]", "" -replace " \[-\]", "")
             $overallWinnerWonThisPage = ($totalTimeSaved -lt 0 -and $pageWinner -eq $winnerA) -or
                                         ($totalTimeSaved -gt 0 -and $pageWinner -eq $winnerB)
             if ($overallWinnerWonThisPage) {
@@ -3268,10 +3456,13 @@ function Start-AnalyzeLogs {
     }
     $outputFile = Join-Path $logsDir "${outputBase}_${timestamp}.csv"
 
+    # Restore built-in Write-Host so export messages are visible in ALL mode
+    if ($autoMode) { Remove-Item Function:\Write-Host -ErrorAction SilentlyContinue }
+
     $comparison | Export-Csv -Path $outputFile -NoTypeInformation -Encoding UTF8
     Write-Host ""
-    Write-Host "CSV exported: " -ForegroundColor Green
-    Write-Host "$outputFile" -ForegroundColor Gray
+    Write-Host " CSV exported: " -ForegroundColor Green
+    Write-Host " $outputFile" -ForegroundColor Gray
     Write-Host ""
 
     # Export to JSON (2-log comparisons only - includes full metadata)
@@ -3344,29 +3535,34 @@ function Start-AnalyzeLogs {
             p99_b_ms         = [int]$p99B
             cv_a_percent     = [Math]::Round($cvA, 1)
             cv_b_percent     = [Math]::Round($cvB, 1)
-            image_failures_a_count = $failureOccs.Count
-            image_failures_b_count = $failureOccsB.Count
-            page_offset_count      = $offsetOccs.Count
-            has_unfair_pages       = [bool]($comparison | Where-Object { $_.Winner -like "*[!]*" -or $_.Winner -like "*[X]*" })
-            a_half_refresh_count   = ($comparison | Where-Object { $_.PSObject.Properties["A_HasRefresh"] -and $_.A_HasRefresh }).Count
-            b_half_refresh_count   = ($comparison | Where-Object { $_.PSObject.Properties["B_HasRefresh"] -and $_.B_HasRefresh }).Count
+            image_failures_a_count   = $failureOccs.Count
+            image_failures_b_count   = $failureOccsB.Count
+            decode_failures_a_count  = $logA.TotalFailedImages
+            decode_failures_b_count  = $logB.TotalFailedImages
+            progressive_pages_count  = ($comparison | Where-Object { $_.Winner.Contains(" [-]") }).Count
+            page_offset_count        = $offsetOccs.Count
+            has_unfair_pages         = [bool]($comparison | Where-Object { $_.Winner -like "*[!]*" -or $_.Winner -like "*[X]*" -or $_.Winner.Contains(" [-]") })
+            a_half_refresh_count     = ($comparison | Where-Object { $_.PSObject.Properties["A_HasRefresh"] -and $_.A_HasRefresh }).Count
+            b_half_refresh_count     = ($comparison | Where-Object { $_.PSObject.Properties["B_HasRefresh"] -and $_.B_HasRefresh }).Count
         }
 
         $jsonPages = @()
         foreach ($row in $comparison) {
-            $bareWinner = $row.Winner -replace " \[!\]", "" -replace " \[~\]", "" -replace " \[X\]", ""
-            $isUnfair   = $row.Winner -like "*[!]*"
+            $bareWinner   = $row.Winner -replace " \[!\]", "" -replace " \[~\]", "" -replace " \[X\]", "" -replace " \[-\]", ""
+            $isUnfair     = $row.Winner -like "*[!]*" -or $row.Winner -like "*[X]*"
+            $isProgressive = $row.Winner.Contains(" [-]")
 
             $pageObj = [ordered]@{
                 page          = $row.Page
-                a_ms          = [int]$row.$colA
-                b_ms          = [int]$row.$colB
-                a_images      = if ($row.$imgColA -eq "X") { -1 } else { [int]$row.$imgColA }
-                b_images      = if ($row.$imgColB -eq "X") { -1 } else { [int]$row.$imgColB }
-                diff_ms       = [int]$row.Diff_ms
-                diff_percent  = [double]($row.Percent -replace '%', '')
+                a_ms          = if ($row.$colA -eq "N/A" -or $row.$colA -eq "cached") { $null } else { [int]$row.$colA }
+                b_ms          = if ($row.$colB -eq "N/A" -or $row.$colB -eq "cached") { $null } else { [int]$row.$colB }
+                a_images      = if ($null -eq $row.$imgColA -or $row.$imgColA -eq "") { $null } elseif ($row.$imgColA -eq "X") { -1 } else { [int]$row.$imgColA }
+                b_images      = if ($null -eq $row.$imgColB -or $row.$imgColB -eq "") { $null } elseif ($row.$imgColB -eq "X") { -1 } else { [int]$row.$imgColB }
+                diff_ms       = if ($row.Diff_ms -eq "N/A") { $null } else { [int]$row.Diff_ms }
+                diff_percent  = if ($row.Percent -eq "N/A") { $null } else { [double]($row.Percent -replace '%', '') }
                 winner        = $bareWinner
                 unfair        = $isUnfair
+                progressive   = $isProgressive
                 a_half_refresh = [bool]($row.PSObject.Properties["A_HasRefresh"] -and $row.A_HasRefresh)
                 b_half_refresh = [bool]($row.PSObject.Properties["B_HasRefresh"] -and $row.B_HasRefresh)
             }
@@ -3427,8 +3623,8 @@ function Start-AnalyzeLogs {
 
         $jsonFile = $outputFile -replace '\.csv$', '.json'
         $jsonOutput | ConvertTo-Json -Depth 5 | Set-Content -Path $jsonFile -Encoding UTF8
-        Write-Host "JSON exported: " -ForegroundColor Green
-        Write-Host "$jsonFile" -ForegroundColor Gray
+        Write-Host " JSON exported: " -ForegroundColor Green
+        Write-Host " $jsonFile" -ForegroundColor Gray
         Write-Host ""
 
         # ── Markdown report ──────────────────────────────────────────────────
@@ -3454,7 +3650,7 @@ function Start-AnalyzeLogs {
         $null = $md.AppendLine("")
 
         # Unfair pages warning (if any)
-        $unfairPages = $comparison | Where-Object { $_.Winner -like "*[!]*" -or $_.Winner -like "*[X]*" }
+        $unfairPages = $comparison | Where-Object { $_.Winner -like "*[!]*" -or $_.Winner -like "*[X]*" -or $_.Winner.Contains(" [-]") }
         if ($unfairPages) {
             $null = $md.AppendLine("> [!WARNING]")
             $null = $md.AppendLine("> Pages marked with [!] have content discrepancies (different image counts or cover generation results).")
@@ -3470,8 +3666,8 @@ function Start-AnalyzeLogs {
         $null = $md.AppendLine("|------|-----:|-----:|------:|------:|--------:|--------:|--------|")
 
         foreach ($row in $comparison) {
-            $w = $row.Winner -replace " \[!\]", "" -replace " \[X\]", ""
-            $flag = if ($row.Winner -like "*[!]*") { " [!]" } elseif ($row.Winner -like "*[X]*") { " [X]" } else { "" }
+            $w = $row.Winner -replace " \[!\]", "" -replace " \[X\]", "" -replace " \[-\]", "" -replace " \[~\]", ""
+            $flag = if ($row.Winner -like "*[!]*") { " [!]" } elseif ($row.Winner -like "*[X]*") { " [X]" } elseif ($row.Winner.Contains(" [-]")) { " [-]" } elseif ($row.Winner.Contains(" [~]")) { " [~]" } else { "" }
             $winnerMd = switch ($w) {
                 "TIE" { "TIE" }
                 $winnerA { "**A**$flag" }
@@ -3491,9 +3687,13 @@ function Start-AnalyzeLogs {
         $null = $md.AppendLine("A = $shortNameA faster  ")
         $null = $md.AppendLine("B = $shortNameB faster  ")
         $null = $md.AppendLine("TIE = difference < 1% (statistically insignificant)  ")
-        $null = $md.AppendLine("[!] = image failure (one version missing an image)  ")
-        $null = $md.AppendLine("[~] = page offset (same image on different page)  ")
-        $null = $md.AppendLine("[R] = Refresh Display (e-ink screen refresh cycle included in page time)")
+        $null = $md.AppendLine("")
+        $null = $md.AppendLine("**Flags:**  ")
+        $null = $md.AppendLine("[X] = Decode failure - image was attempted but failed to decode (more work, no result)  ")
+        $null = $md.AppendLine("[!] = Missing image - one version is entirely missing a picture  ")
+        $null = $md.AppendLine("[-] = Lower quality - image decoded as progressive JPEG (DC coefficients only, reduced quality)  ")
+        $null = $md.AppendLine("[~] = Page offset - same image present in both versions but on different pages  ")
+        $null = $md.AppendLine("[R] = Refresh Display - page includes an e-ink screen refresh cycle (not content rendering time)  ")
         $null = $md.AppendLine("")
 
         # Summary
@@ -3504,13 +3704,17 @@ function Start-AnalyzeLogs {
         $null = $md.AppendLine("| Pages analyzed | $($comparison.Count) | $($comparison.Count) |")
         $null = $md.AppendLine("| Total images rendered | $($logA.TotalImages) | $($logB.TotalImages) |")
         if ($logA.TotalFailedImages -gt 0 -or $logB.TotalFailedImages -gt 0) {
-            $null = $md.AppendLine("| Decode errors | $($logA.TotalFailedImages) | $($logB.TotalFailedImages) |")
+            $null = $md.AppendLine("| Decode errors [X] | $($logA.TotalFailedImages) | $($logB.TotalFailedImages) |")
         }
         if ($failureOccs.Count -gt 0 -or $failureOccsB.Count -gt 0) {
-            $null = $md.AppendLine("| Image failures | $($failureOccs.Count) | $($failureOccsB.Count) |")
+            $null = $md.AppendLine("| Image failures [!] | $($failureOccs.Count) | $($failureOccsB.Count) |")
+        }
+        $progressivePages = ($comparison | Where-Object { $_.Winner.Contains(" [-]") }).Count
+        if ($progressivePages -gt 0) {
+            $null = $md.AppendLine("| Progressive JPEG pages [-] | $progressivePages | |")
         }
         if ($offsetOccs.Count -gt 0) {
-            $null = $md.AppendLine("| Page offset effects | $($offsetOccs.Count) | |")
+            $null = $md.AppendLine("| Page offset effects [~] | $($offsetOccs.Count) | |")
         }
         if (($covSuccessA + $covFailedA) -gt 0) {
             $mdCovStatA = if ($covSuccessA -gt 0) { "SUCCESS" } else { "FAILED" }
@@ -3532,7 +3736,7 @@ function Start-AnalyzeLogs {
             $null = $md.AppendLine("## Unfair Comparisons Detail")
             $null = $md.AppendLine("")
             foreach ($up in $unfairPages) {
-                $upWinner = $up.Winner -replace " \[!\]", "" -replace " \[X\]", ""
+                $upWinner = $up.Winner -replace " \[!\]", "" -replace " \[X\]", "" -replace " \[-\]", ""
                 $upImgA = $up.PSObject.Properties[$imgColA]; $upImgAv = if ($null -ne $upImgA) { if ($upImgA.Value -eq "X") { 0 } else { [int]$upImgA.Value } } else { 0 }
                 $upImgB = $up.PSObject.Properties[$imgColB]; $upImgBv = if ($null -ne $upImgB) { if ($upImgB.Value -eq "X") { 0 } else { [int]$upImgB.Value } } else { 0 }
                 $upCs = $up.PSObject.Properties["${colA}_CoverSuccess"]
@@ -3546,6 +3750,10 @@ function Start-AnalyzeLogs {
                     } else {
                         $null = $md.AppendLine("  > [i] Winner generated the cover successfully - result is conservative")
                     }
+                } elseif ($up.Winner.Contains(" [-]")) {
+                    $upLoserDisplay = if ($upWinner -eq $winnerA) { $shortNameB } else { $shortNameA }
+                    $null = $md.AppendLine("- **Page $($up.Page) [-]**: $upWinnerDisplay faster (progressive JPEG - lower quality decode) vs $upLoserDisplay (full quality decode)")
+                    $null = $md.AppendLine("  > [-] Lower quality faster: $upWinnerDisplay decoded image as progressive JPEG (DC coefficients only) - lower quality rendering may explain the speed difference")
                 } else {
                     $upLoserDisplay = if ($upWinner -eq $winnerA) { $shortNameB } else { $shortNameA }
                     $upWinnerImgs   = if ($upWinner -eq $winnerA) { $upImgAv } else { $upImgBv }
@@ -3670,20 +3878,27 @@ function Start-AnalyzeLogs {
         if ($uniqueTypes -gt 1) {
             $null = $md.AppendLine("## Optimization Impact")
             $null = $md.AppendLine("")
-            $mdPageMost  = if ($mostImproved.Page  -like "Cover*") { $mostImproved.Page  } else { "Page $($mostImproved.Page)" }
-            $mdPageLeast = if ($leastImproved.Page -like "Cover*") { $leastImproved.Page } else { "Page $($leastImproved.Page)" }
+            # Page labels always clean — no [X]/[!]/[-] on the label itself
+            $mdPageMost  = if ($mostImproved.Page  -like "Cover*") { "Cover" } else { "Page $($mostImproved.Page  -replace ' \[X\]','' -replace ' \[!\]','' -replace ' \[-\]','')" }
+            $mdPageLeast = if ($leastImproved.Page -like "Cover*") { "Cover" } else { "Page $($leastImproved.Page -replace ' \[X\]','' -replace ' \[!\]','' -replace ' \[-\]','')" }
             $mostPct = [Math]::Abs([double]($mostImproved.Percent -replace '%', ''))
             if ($mostPct -gt 1) {
-                $mostFlag = if ($mostIsMisleading) { " [!]" } else { "" }
-                $null = $md.AppendLine("- **Most improved:** $mdPageMost - $shortNameB is $([Math]::Abs($mostImproved.Diff_ms)) ms faster ($($mostImproved.Percent))$mostFlag")
+                $mostSuffix = if ($mostIsMisleading) {
+                    $fi = Get-WinnerFlagInfo $mostImproved.Winner
+                    " - $($fi.Token) $shortNameB faster ($($fi.Reason))"
+                } else { "" }
+                $null = $md.AppendLine("- **Most improved:** $mdPageMost - $shortNameB is $([Math]::Abs($mostImproved.Diff_ms)) ms faster ($($mostImproved.Percent))$mostSuffix")
             } else {
                 $null = $md.AppendLine("- **Most improved:** $mdPageMost - $shortNameB is $([Math]::Abs($mostImproved.Diff_ms)) ms faster ($($mostImproved.Percent)) *(statistically insignificant)*")
             }
             $leastPct = [double]($leastImproved.Percent -replace '%', '')
             if ($gotWorse -and $leastPct -gt 1) {
-                $leastFlag = if ($leastIsMisleading) { " [!]" } else { "" }
+                $leastSuffix = if ($leastIsMisleading) {
+                    $fi = Get-WinnerFlagInfo $leastImproved.Winner
+                    " - $($fi.Token) $shortNameA faster ($($fi.Reason))"
+                } else { "" }
                 $mdRegrR = if ($leastImproved.PSObject.Properties["B_HasRefresh"] -and $leastImproved.B_HasRefresh) { " [R]" } else { "" }
-                $null = $md.AppendLine("- **Regression:** $mdPageLeast - $shortNameB is $($leastImproved.Diff_ms) ms SLOWER ($($leastImproved.Percent))${leastFlag}${mdRegrR}")
+                $null = $md.AppendLine("- **Regression:** $mdPageLeast - $shortNameB is $($leastImproved.Diff_ms) ms SLOWER ($($leastImproved.Percent))${leastSuffix}${mdRegrR}")
             } elseif ($gotWorse) {
                 $null = $md.AppendLine("- **Regression:** $mdPageLeast - $shortNameB is $($leastImproved.Diff_ms) ms slower ($($leastImproved.Percent)) *(statistically insignificant)*")
             } else {
@@ -3738,16 +3953,34 @@ function Start-AnalyzeLogs {
 
         $mdFile = $outputFile -replace '\.csv$', '.md'
         $md.ToString() | Set-Content -Path $mdFile -Encoding UTF8
-        Write-Host "MD  exported: " -ForegroundColor Green
-        Write-Host "$mdFile" -ForegroundColor Gray
+        Write-Host " MD  exported: " -ForegroundColor Green
+        Write-Host " $mdFile" -ForegroundColor Gray
         Write-Host ""
     }
 
     # Ask if user wants to see charts (only for 2-log comparisons)
     if ($logsWithTimes.Count -eq 2) {
+
+        # ALL mode: skip charts, auto-advance to next session
+        if ($autoMode) {
+            $sessionsDone = $totalAutoSessions - $pendingAutoSessions.Count
+            if ($pendingAutoSessions.Count -gt 0) {
+                $selectedIndices = $pendingAutoSessions.Dequeue()
+                continue autoLoop
+            } else {
+                [Console]::WriteLine("")
+                [Console]::ForegroundColor = [System.ConsoleColor]::Green
+                [Console]::WriteLine("[ALL] All $totalAutoSessions sessions analyzed.")
+                [Console]::ResetColor()
+                Write-Host "Press ESC to return to Menu..." -ForegroundColor Gray
+                do { $exitKey = [Console]::ReadKey($true) } until ($exitKey.Key -eq [ConsoleKey]::Escape)
+                return
+            }
+        }
+
         Write-Host ""
         Write-Host ""
-        Write-Host "Press ENTER to Show Performance Charts, or ESC to return to Menu..." -ForegroundColor Gray
+        Write-Host " Press ENTER to Show Performance Charts, or ESC to return to Menu..." -ForegroundColor Gray
         $key = [Console]::ReadKey($true)
 
         if ($key.Key -ne [ConsoleKey]::Enter) { return }
@@ -3780,12 +4013,12 @@ function Start-AnalyzeLogs {
             if ($chartType -eq "1" -or $chartType -eq "4") {
                 Write-Host ""
                 Write-Host ""
-                Write-Host "Bar Chart - Page Render Times Comparison" -ForegroundColor Cyan
-                Write-Host "Comparing: " -NoNewline -ForegroundColor Yellow
+                Write-Host " Bar Chart - Page Render Times Comparison" -ForegroundColor Cyan
+                Write-Host " Comparing: " -NoNewline -ForegroundColor Yellow
                 Write-Host "$displayNameA (A)" -NoNewline -ForegroundColor Blue
                 Write-Host " vs " -NoNewline -ForegroundColor Yellow
                 Write-Host "$displayNameB (B)" -ForegroundColor Green
-                Write-Host "Each bar shows render time in milliseconds." -ForegroundColor Gray
+                Write-Host " Each bar shows render time in milliseconds." -ForegroundColor Gray
                 Write-Host ""
 
                 # Pre-calculate max ms digit width for consistent column alignment
@@ -3801,9 +4034,10 @@ function Start-AnalyzeLogs {
                     $timeB = $row.$colB
 
                     # Skip if times are null or invalid
-                    if ($null -eq $timeA -or $null -eq $timeB -or $timeA -eq "N/A" -or $timeB -eq "N/A") {
+                    if ($null -eq $timeA -or $null -eq $timeB -or $timeA -eq "N/A" -or $timeB -eq "N/A" -or $timeA -eq "cached" -or $timeB -eq "cached") {
                         $pageLabel = Get-ChartPageLabel $row.Page
-                        Write-Host "  $pageLabel N/A (no timing data)" -ForegroundColor Gray
+                        Write-Host "   $pageLabel" -NoNewline -ForegroundColor Cyan
+                        Write-Host "N/A (no timing data)" -ForegroundColor Gray
                         continue
                     }
 
@@ -3819,7 +4053,7 @@ function Start-AnalyzeLogs {
 
                     # Display "Cover  :" or "Page X:" with proper alignment
                     $pageLabel = Get-ChartPageLabel $row.Page
-                    Write-Host "  $pageLabel" -NoNewline -ForegroundColor Cyan
+                    Write-Host "   $pageLabel" -NoNewline -ForegroundColor Cyan
 
                     # Bar A
                     Write-Host "A [" -NoNewline -ForegroundColor Blue
@@ -3838,14 +4072,15 @@ function Start-AnalyzeLogs {
                     if ($row.PSObject.Properties["B_HasRefresh"] -and $row.B_HasRefresh) { Write-Host "[R] " -NoNewline -ForegroundColor Cyan } else { Write-Host "    " -NoNewline }
                     Write-Host "$($timeB.ToString().PadLeft($msWidthBar))ms " -NoNewline -ForegroundColor Gray
 
-                    # Winner + page marker at end of line
-                    # [!] = true image failure, [X] = decode failure, [~] = page-offset effect
-                    $isFailureBar = ($row.Winner -like "*[!]*" -or $row.Page -like "*[!]*")
-                    $isDecodeFailBar = ($row.Winner -like "*[X]*" -or $row.Page -like "*[X]*")
-                    $isOffsetBar  = ($row.Winner -like "*[~]*")
-                    $lineMarker   = if ($isDecodeFailBar) { " [X]" } elseif ($isFailureBar) { " [!]" } elseif ($isOffsetBar) { " [~]" } else { "" }
+                    # Winner + page marker at end of line — only show when the WINNER carried the marker
+                    # [!] = true image failure, [X] = decode failure, [~] = page-offset effect, [-] = lower quality
+                    $isFailureBar    = ($row.Winner -like "*[!]*")
+                    $isDecodeFailBar = ($row.Winner -like "*[X]*")
+                    $isOffsetBar     = ($row.Winner.Contains(" [~]"))
+                    $isProgressiveBar = ($row.Winner.Contains(" [-]"))
+                    $lineMarker   = if ($isDecodeFailBar) { " [X]" } elseif ($isFailureBar) { " [!]" } elseif ($isProgressiveBar) { " [-]" } elseif ($isOffsetBar) { " [~]" } else { "" }
                     $markerColor  = if ($isDecodeFailBar -or $isFailureBar) { "Red" } else { "Yellow" }
-                    $bareWinnerChart = $row.Winner -replace " \[!\]", "" -replace " \[~\]", "" -replace " \[X\]", ""
+                    $bareWinnerChart = $row.Winner -replace " \[!\]", "" -replace " \[~\]", "" -replace " \[X\]", "" -replace " \[-\]", "" -replace " \[-\]", ""
                     if ($bareWinnerChart -eq "TIE") {
                         Write-Host "TIE" -NoNewline -ForegroundColor Gray
                         if ($lineMarker) { Write-Host $lineMarker -NoNewline -ForegroundColor $markerColor }
@@ -3863,19 +4098,19 @@ function Start-AnalyzeLogs {
                     }
                 }
                 Write-Host ""
-                Write-Host "Legend: Longer bars indicate slower page load times" -ForegroundColor Gray
+                Write-Host " Legend: Longer bars indicate slower page load times" -ForegroundColor Gray
                 Write-Host ""
             }
 
             if ($chartType -eq "2" -or $chartType -eq "4") {
                 Write-Host ""
                 Write-Host ""
-                Write-Host "Trend Chart - Page Render Times Over Time" -ForegroundColor Cyan
-                Write-Host "Comparing: " -NoNewline -ForegroundColor Yellow
+                Write-Host " Trend Chart - Page Render Times Over Time" -ForegroundColor Cyan
+                Write-Host " Comparing: " -NoNewline -ForegroundColor Yellow
                 Write-Host "$displayNameA (A)" -NoNewline -ForegroundColor Blue
                 Write-Host " vs " -NoNewline -ForegroundColor Yellow
                 Write-Host "$displayNameB (B)" -ForegroundColor Green
-                Write-Host "Shows how render times change across pages." -ForegroundColor Gray
+                Write-Host " Shows how render times change across pages." -ForegroundColor Gray
                 Write-Host ""
 
                 # Find global maximum for scaling
@@ -3885,8 +4120,8 @@ function Start-AnalyzeLogs {
                     $timeB = $row.$colB
 
                     # Skip null or invalid values
-                    if ($null -eq $timeA -or $timeA -eq "N/A" -or -not ($timeA -is [int] -or $timeA -is [double] -or $timeA -is [decimal])) { $timeA = 0 }
-                    if ($null -eq $timeB -or $timeB -eq "N/A" -or -not ($timeB -is [int] -or $timeB -is [double] -or $timeB -is [decimal])) { $timeB = 0 }
+                    if ($null -eq $timeA -or $timeA -eq "N/A" -or $timeA -eq "cached" -or -not ($timeA -is [int] -or $timeA -is [double] -or $timeA -is [decimal])) { $timeA = 0 }
+                    if ($null -eq $timeB -or $timeB -eq "N/A" -or $timeB -eq "cached" -or -not ($timeB -is [int] -or $timeB -is [double] -or $timeB -is [decimal])) { $timeB = 0 }
 
                     $globalMax = [Math]::Max([Math]::Max($globalMax, $timeA), $timeB)
                 }
@@ -3897,9 +4132,10 @@ function Start-AnalyzeLogs {
                     $timeB = $row.$colB
 
                     # Skip if times are null or invalid
-                    if ($null -eq $timeA -or $null -eq $timeB -or $timeA -eq "N/A" -or $timeB -eq "N/A") {
+                    if ($null -eq $timeA -or $null -eq $timeB -or $timeA -eq "N/A" -or $timeB -eq "N/A" -or $timeA -eq "cached" -or $timeB -eq "cached") {
                         $pageLabel = Get-ChartPageLabel $row.Page
-                        Write-Host "  $pageLabel N/A (no timing data)" -ForegroundColor Gray
+                        Write-Host "   $pageLabel" -NoNewline -ForegroundColor Cyan
+                        Write-Host "N/A (no timing data)" -ForegroundColor Gray
                         continue
                     }
 
@@ -3913,7 +4149,7 @@ function Start-AnalyzeLogs {
 
                     # Display "Cover  :" or "Page X:" with proper alignment
                     $pageLabel = Get-ChartPageLabel $row.Page
-                    Write-Host "  $pageLabel" -NoNewline -ForegroundColor Cyan
+                    Write-Host "   $pageLabel" -NoNewline -ForegroundColor Cyan
 
                     # Trend line A
                     Write-Host "A [" -NoNewline -ForegroundColor Blue
@@ -3941,7 +4177,7 @@ function Start-AnalyzeLogs {
                     }
                 }
                 Write-Host ""
-                Write-Host "Legend: Dots (position from left) show relative speed. Further left = faster page" -ForegroundColor Gray
+                Write-Host " Legend: Dots (position from left) show relative speed. Further left = faster page" -ForegroundColor Gray
                 Write-Host ""
             }
 
@@ -3949,17 +4185,17 @@ function Start-AnalyzeLogs {
             if ($chartType -eq "3" -or $chartType -eq "4") {
                 Write-Host ""
                 Write-Host ""
-                Write-Host "Statistics Chart - Performance Metrics Comparison" -ForegroundColor Cyan
-                Write-Host "Comparing: " -NoNewline -ForegroundColor Yellow
+                Write-Host " Statistics Chart - Performance Metrics Comparison" -ForegroundColor Cyan
+                Write-Host " Comparing: " -NoNewline -ForegroundColor Yellow
                 Write-Host "$displayNameA (A)" -NoNewline -ForegroundColor Blue
                 Write-Host " vs " -NoNewline -ForegroundColor Yellow
                 Write-Host "$displayNameB (B)" -ForegroundColor Green
-                Write-Host "Bar lengths show relative magnitude. Lower values generally indicate better performance" -ForegroundColor Gray
+                Write-Host " Bar lengths show relative magnitude. Lower values generally indicate better performance" -ForegroundColor Gray
                 Write-Host ""
 
-                # Calculate statistics for the chart
-                $timesA = $comparison | ForEach-Object { $_.$colA }
-                $timesB = $comparison | ForEach-Object { $_.$colB }
+                # Calculate statistics for the chart (exclude N/A rows e.g. cover from cache)
+                $timesA = @($comparison | ForEach-Object { $_.$colA } | Where-Object { $_ -ne "N/A" -and $_ -ne "cached" -and $null -ne $_ })
+                $timesB = @($comparison | ForEach-Object { $_.$colB } | Where-Object { $_ -ne "N/A" -and $_ -ne "cached" -and $null -ne $_ })
 
                 $minA = ($timesA | Measure-Object -Minimum).Minimum
                 $maxA = ($timesA | Measure-Object -Maximum).Maximum
@@ -4054,12 +4290,12 @@ function Start-AnalyzeLogs {
 
                 # Statistics explanation
                 Write-Host ""
-                Write-Host "Legend:" -ForegroundColor Gray
-                Write-Host "  Min/Max: Fastest/Slowest page render times" -ForegroundColor Gray
-                Write-Host "  Avg/Median: Average/Middle page render time" -ForegroundColor Gray
-                Write-Host "  Std Dev: How much render times vary (lower = more consistent)" -ForegroundColor Gray
-                Write-Host "  P95: 95th percentile (95%% of pages render faster than this)" -ForegroundColor Gray
-                Write-Host "  Coef. of Variation: Std Dev / Avg (lower = more consistent performance)" -ForegroundColor Gray
+                Write-Host " Legend:" -ForegroundColor Gray
+                Write-Host "  " -NoNewline; Write-Host "Min/Max" -NoNewline -ForegroundColor Gray; Write-Host ": Fastest/Slowest page render times" -ForegroundColor White
+                Write-Host "  " -NoNewline; Write-Host "Avg/Median" -NoNewline -ForegroundColor Gray; Write-Host ": Average/Middle page render time" -ForegroundColor White
+                Write-Host "  " -NoNewline; Write-Host "Std Dev" -NoNewline -ForegroundColor Gray; Write-Host ": How much render times vary (lower = more consistent)" -ForegroundColor White
+                Write-Host "  " -NoNewline; Write-Host "P95" -NoNewline -ForegroundColor Gray; Write-Host ": 95th percentile (95% of pages render faster than this)" -ForegroundColor White
+                Write-Host "  " -NoNewline; Write-Host "Coef. of Variation" -NoNewline -ForegroundColor Gray; Write-Host ": Std Dev / Avg (lower = more consistent performance)" -ForegroundColor White
                 Write-Host ""
             }
 
@@ -4069,6 +4305,8 @@ function Start-AnalyzeLogs {
             return
         }
     }
+
+    } while ($autoMode)  # :autoLoop — ALL mode uses [continue autoLoop] to repeat for each session
 
 }
 
@@ -4080,39 +4318,29 @@ $running = $true
 
 while ($running) {
     Show-MainMenu
-    $choice = Read-Host "Select option"
+    $choice = Read-Host " Select option"
 
     switch ($choice) {
         "1" {
             $null = Start-SingleDeviceCapture
-            if ($global:CaptureSuccess -eq $true) {
+            while ($global:CaptureSuccess -eq $true) {
                 Show-CaptureCompleteMenu
                 $postCapture = Read-Host "Select option"
-                switch ($postCapture) {
-                    "0" { Start-SingleDeviceCapture }
-                    "1" { Start-AnalyzeLogs }
-                    "2" {
-                        # Return to main menu - do nothing, loop continues
-                    }
-                    "3" { $running = $false }
-                }
+                if     ($postCapture -eq "1") { $null = Start-SingleDeviceCapture }
+                elseif ($postCapture -eq "2") { $null = Start-DualDeviceCapture }
+                elseif ($postCapture -eq "3") { Start-AnalyzeLogs; break }
+                else                          { break }  # [0] or anything → main menu
             }
         }
         "2" {
             $null = Start-DualDeviceCapture
-            if ($global:CaptureSuccess -eq $true) {
+            while ($global:CaptureSuccess -eq $true) {
                 Show-CaptureCompleteMenu
                 $postCapture = Read-Host "Select option"
-                switch ($postCapture) {
-                    "0" { Start-DualDeviceCapture }
-                    "1" { Start-AnalyzeLogs }
-                    "2" {
-                        # Return to main menu - do nothing, loop continues
-                    }
-                    "3" { $running = $false }
-                }
-            } else {
-                # Capture failed, return to menu
+                if     ($postCapture -eq "1") { $null = Start-SingleDeviceCapture }
+                elseif ($postCapture -eq "2") { $null = Start-DualDeviceCapture }
+                elseif ($postCapture -eq "3") { Start-AnalyzeLogs; break }
+                else                          { break }  # [0] or anything → main menu
             }
         }
         "3" {
